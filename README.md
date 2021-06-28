@@ -20,7 +20,7 @@ Usage:
 - submit.sh <appid> <arch> <depth> <batch> <workers> <folder> <port> <cuda_device>
 
 Example:
-- bash submit.sh 0 resnet 18 128 16 ./out_put_folder 5663 '0 1 2 3' 
+- bash submit.sh 0 resnet 18 128 16 ./out_put_folder 5663 '0,1,2,3' 
 ```
 
 - `dl_submit.py'.` is an application dispatcher, which reads applications' info from `dl_submit.conf.csv` and calls `submit.sh` to lauch applications. Please edit `dl_submit.conf.csv` before running `dl_submit.py'.
