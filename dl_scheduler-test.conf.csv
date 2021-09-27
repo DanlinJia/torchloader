@@ -1,0 +1,4 @@
+arch,depth,batch,workers,output_folder,port,arrival_time,cuda_device
+resnet, 18, 128, 2, "single_1workers_1device", 5336, 1, "0"
+
+
