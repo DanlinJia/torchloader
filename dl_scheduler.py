@@ -1,14 +1,16 @@
+from builtins import enumerate
+import pandas as pd
+import numpy as np
 import os
 import subprocess
 import time, datetime
 import pickle
 import collections
 import threading
-import pandas as pd
-import numpy as np
+import psutil
 from multiprocessing import Process, Pipe, Lock
 from dateutil import parser
-from dl_app import application
+from dl_app import application, app_main
 
 
 def conn_message(mesg_type, mesg_data=None):
@@ -43,7 +45,7 @@ class submitter():
     def read_app_submissions(self):
         # generate a set of applications by reading data from a csv file
         df = pd.read_csv(self.submit_path, header=0, skipinitialspace=True)
-        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: x.replace(" ", ",") if (type(x)==str) else x)
+        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: [int(d) for d in x.split(" ")] if (type(x)==str) else [int(x)])
         if len(df)==0:
             print("Warning: No application submitted")
         for i in range(len(df)):
@@ -54,26 +56,31 @@ class submitter():
 
     def user_submiter_fn(self):
         def _submit():
-            app_buffer = self.buffer
-            if len(app_buffer)>0:
-                print("{}: submitter submits app {}".format(datetime.datetime.now(), [app.appid for app in app_buffer]))
+            if len(self.buffer)>0:
+                print("{}: submitter submits app {}".format(datetime.datetime.now(), [app.appid for app in self.buffer]))
                 self.conn.send(conn_message("Arrival", self.buffer))
+                self.buffer = []
+        def _inwindow(app_ari, start, end):
+            if app_ari >= start and app_ari <= end:
+                return True
+            return False
         self.read_app_submissions()
         cur_time = 0
         while len(self.app_infos) > 0:
+            app = self.app_infos[0]
+            if _inwindow(app.arrival_time, cur_time, cur_time+self.buffer_size):
+                app = self.app_infos.pop(0)
+                app.appid = int((app.arrival_time - cur_time)*1e9 + time.time_ns())
+                expriment_name = "{}{}_{}_{}_{}_app{}".format(
+                                app.arch, app.depth, app.batch, app.workers, len(app.cuda_device) ,app.appid)
+                app.work_space = os.path.join("trace", app.work_space, expriment_name)
+                os.system("mkdir -p {}".format(app.work_space))
+                self.buffer.append(app)
+                continue
+            _submit()
             time.sleep(self.buffer_size)
             cur_time += self.buffer_size
-            for i, app in enumerate(self.app_infos):
-                # record the ith app that should be loaded in next batch
-                if app.arrival_time > cur_time:
-                    break
-            if i==len(self.app_infos)-1:
-                self.buffer = self.app_infos
-                self.app_infos = []
-            else:
-                self.buffer = self.app_infos[:i]
-                self.app_infos = self.app_infos[i:]
-            _submit()
+        _submit()
         self.conn.send(conn_message("End", self.submisson_num))
 
     def main_fn(self):
@@ -135,9 +142,9 @@ class dl_scheduler():
         
     def exec_single_app(self, app: application):
         try:
-            parent_conn, child_conn = self.channels[app.appid]
-            #p = Process(target=worker_test_fn, args=(child_conn,), name="app-{}".format(app.appid), daemon=False)
-            p = Process(target=worker_test_fn, args=(app.appid, child_conn, 2, app.start_iter ), name="app-{}".format(app.appid), daemon=True)
+            _, child_conn = self.channels[app.appid]
+            p = Process(target=app_main, args=(child_conn, app,), name="app-{}".format(app.appid), daemon=False)
+            # p = Process(target=worker_test_fn, args=(app.appid, child_conn, 2, app.start_iter ), name="app-{}".format(app.appid), daemon=True)
             app.process = p
             app.process.start()
         except Exception as e:
@@ -150,7 +157,7 @@ class dl_scheduler():
                 # get the parent_conn of app
                 parent_conn = self.channels[app.appid][0]
                 # send a pause signal to the child_conn
-                parent_conn.send(["Pause"])
+                parent_conn.send(conn_message("Pause"))
             # set the number of pause signal in this round 
             self.paused_signal = len(self.app_running)
         except Exception as e:
@@ -188,13 +195,17 @@ class dl_scheduler():
                         # if an app is paused, record the app's next start iteration
                         if app_event[1]=="Paused":
                             print("{}: master: {}, receives pause echo: {}".format(datetime.datetime.now(), app.appid, app_event))
-                            app.start_iter = app_event[2] + 1
+                            app.start_iter = app_event[2]["iter"] + 1 if \
+                                                (app.start_iter==0 or app_event[2]["iter"]<app.start_iter) \
+                                                else app.start_iter
                             self.pause_handler(app)
                         # if an app is finished
                         elif app_event[1]=="Finished":
                             print("{}: master: {}, receives finish echo: {}".format(datetime.datetime.now(), app.appid, app_event))
                             app.finish_time = parser.parse(app_event[0])
                             self.finish_handler(app)
+                        elif app_event[1]=="HeartBeat":
+                            print("{}: master: {}, receives heartbeat: {}".format(datetime.datetime.now(), app.appid, app_event))
 
     def arrival_handler(self, apps):
         # all new app needs to initialize conn channels
@@ -222,16 +233,28 @@ class dl_scheduler():
                 print("arrival_handler", e)
         
     def pause_handler(self, app):
-        try:
-            self.app_running.remove(app)
-            self.app_paused.append(app)
-            self.paused_counter += 1
-            self.print_queues()
-            # if all apps are paused, resume the world
-            if self.paused_signal == self.paused_counter:
-                self.resume_handler()
-        except Exception as e:
-            print("pause_handler", e)
+        def wait_process_stop(ps):
+            while len(ps)>0:
+                for i, p in enumerate(ps):
+                    # if (not psutil.pid_exists(p.pid)) or (not p.is_alive()):
+                    if not p.is_alive():
+                        ps.pop(i)
+        # try:
+        self.app_running.remove(app)
+        app.checkpoint = True
+        app.port += 1
+        self.app_paused.append(app)
+        self.paused_counter += 1
+        self.print_queues()
+        # if all apps are paused, resume the world
+        if (self.paused_signal == self.paused_counter): 
+            start = time.time()
+            wait_process_stop([app.process for app in self.app_paused])
+            print("pause waiting time: {}".format(time.time() - start))
+            self.resume_handler()
+            self.paused_counter = 0
+        # except Exception as e:
+        #     print("pause_handler", e)
 
     def finish_handler(self, app):
         try:
@@ -273,7 +296,7 @@ class dl_scheduler():
     def print_queues(self):
         print("ready: {}, running: {}, paused: {}, finished: {}".format([app.appid for app in self.app_ready], [app.appid for app in self.app_running], [app.appid for app in self.app_paused], [app.appid for app in self.app_finished]))
 
-submit_path = "/tmp/home/danlinjia/pytorch_test/dl_submit.conf.csv"
+submit_path = "/tmp/home/danlinjia/torchloader/torchloader/dl_scheduler-test.conf.csv"
 ws_conn, sb_conn = Pipe()
 ws = dl_scheduler(ws_conn)
 sb = submitter(submit_path, sb_conn, time_window=5)
