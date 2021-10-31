@@ -1,15 +1,17 @@
 from builtins import enumerate
+from typing import overload
 import pandas as pd
 import numpy as np
 import os
 import subprocess
 import time, datetime
 import pickle
-import collections
+import logging
 import threading
-import psutil
+import pickle
 from multiprocessing import Process, Pipe, Lock
 from dateutil import parser
+from pandas.io.clipboards import read_clipboard
 from dl_app import application, app_main
 
 
@@ -71,8 +73,8 @@ class submitter():
             if _inwindow(app.arrival_time, cur_time, cur_time+self.buffer_size):
                 app = self.app_infos.pop(0)
                 app.appid = int((app.arrival_time - cur_time)*1e9 + time.time_ns())
-                expriment_name = "{}{}_{}_{}_{}_app{}".format(
-                                app.arch, app.depth, app.batch, app.workers, len(app.cuda_device) ,app.appid)
+                expriment_name = "app{}_{}{}_{}_{}_{}".format(
+                                app.appid, app.arch, app.depth, app.batch, app.workers, len(app.cuda_device))
                 app.work_space = os.path.join("trace", app.work_space, expriment_name)
                 os.system("mkdir -p {}".format(app.work_space))
                 self.buffer.append(app)
@@ -88,8 +90,76 @@ class submitter():
         submiter_j.start()
         # submiter_j.join()
 
+
+class dl_tpt_pridictor():
+    def __init__(self, cpu_cores, gpu_devices, cpu_model_path='', gpu_model_path='', model_info_path=''):
+        self.cpu_cores = cpu_cores
+        self.gpu_devices = gpu_devices
+        self.cpu_model = None
+        self.gpu_model = None
+        self.model_info = None
+        try:
+            if cpu_model_path:
+                with open(cpu_model_path, 'rb') as cpu_model_obj:
+                    self.cpu_model = pickle.load(cpu_model_obj)
+            if gpu_model_path:
+                with open(gpu_model_path, 'rb') as gpu_model_obj:
+                    self.gpu_model = pickle.load(gpu_model_obj)
+            if model_info_path:
+                self.model_info = pd.read_csv(model_info_path)
+        except Exception as e:
+            print(e)
+            raise
+
+    def predict_cpu_tpt(self, app: application):
+        num_device = len(app.cuda_device)
+        cpu_x0 = 1/(num_device)
+        return 1/self.cpu_model.predict(np.array([cpu_x0]).reshape(1, -1))[0]
+
+    def predict_gpu_tpt(self, app: application):
+        num_device = len(app.cuda_device)
+        model_name = "{}{}".format(app.arch, app.depth)
+        flops = self.model_info[self.model_info["model"]==model_name]["flops"].drop_duplicates().item()
+        params = self.model_info[self.model_info["model"]==model_name]["params"].drop_duplicates().item()
+        gpu_x0, gpu_x1, gpu_x2, gpu_x3 = app.batch/num_device*flops, (num_device-1)*params, params, app.batch/num_device*params
+        return app.batch/self.gpu_model.predict(np.array([gpu_x0, gpu_x1, gpu_x2]).reshape(1, -1))[0]
+
+    def worker_allocator(self, apps, debug=False):
+        diff_apps = []
+        intact_apps = []
+        tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "workers", "num_device"])
+        for app in apps:
+            num_device = len(app.cuda_device)
+            cpu_tpt_per_device = self.predict_cpu_tpt(app)
+            gpu_max_tpt = self.predict_gpu_tpt(app)
+            worker_per_device_float = gpu_max_tpt/cpu_tpt_per_device
+            worker_per_device_int = int(worker_per_device_float) + 1
+            overload_worker_per_device = worker_per_device_int - worker_per_device_float
+            tpt_df.loc[len(tpt_df), :] = [app.appid, gpu_max_tpt, \
+                                            cpu_tpt_per_device, worker_per_device_float, \
+                                            overload_worker_per_device, worker_per_device_int, \
+                                            num_device]
+        if debug:
+            print(tpt_df)
+        if (tpt_df["workers"]*tpt_df["num_device"]).sum() > self.cpu_cores:
+            tpt_df = tpt_df.sort_values(by=["over_w", "cal_w"], ascending=False)
+            index = 0
+            while (tpt_df["workers"]*tpt_df["num_device"]).sum() > self.cpu_cores and tpt_df["workers"].sum()!=len(tpt_df):
+                if tpt_df["workers"].iloc[index] > 1:
+                    tpt_df["workers"].iloc[index] -= 1
+                index = (index + 1)%len(tpt_df)
+        for app in apps:
+            new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "num_device"].item()
+            if new_workers != app.workers:
+                diff_apps.append(app)
+                app.workers = new_workers
+            else:
+                intact_apps.append(app)
+        return diff_apps, intact_apps
+        
+
 class dl_scheduler():
-    def __init__(self, sub_conn):
+    def __init__(self, sub_conn, through_predictor, mode=3):
         # channels is a appid:[parent_conn, child_conn] mapping directory.
         self.channels = {}
         # a list of ready applications
@@ -111,35 +181,21 @@ class dl_scheduler():
         self.stop_flag = -1
         # count how many apps finished
         self.finished_count = 0
+        # throughput predictor initialization
+        self.tp = through_predictor
+        # global lock to protect spawning application
+        self.lock = Lock()
+        # mode:
+        # 1. no worker reallocation
+        # 2. reallocate workers for arrival signal
+        # 3. reallocate workers for both arrival and finish signals
+        self.mode = mode
+
 
     def main_loop_fn(self):
-        # get submitted app info
-        # self.read_app_submissions()
-        # scheduler_conn, listener_conn = Pipe()
-        # self.create_listener(listener_conn)
-        # for arrival_time in self.app_infos.keys():
-        #     time.sleep(arrival_time)
-        #     # self.app_health_tracker()
-        #     self.reallocate_workers()
-        #     self.pause_world()
-        #     self.resume_world(scheduler_conn)
-        #     self.app_ready.extend(self.app_infos[arrival_time])
-        #     self.exec_ready_apps()
-        # # while len(self.app_ready)!=0:
-        # #     self.app_health_tracker()
-        # for app in self.app_finished:
-        #     app.process.join()
-        #     app.listener.join()
-        # scheduler_conn, listener_conn = Pipe()
         self.create_listener()
-        # t = threading.Thread(target=self.resume_world, args=(scheduler_conn, ), name="scheduler", daemon=False)
-        # t.start()
-        # p.join()
 
-    def exec_ready_apps(self):
-        for app in self.app_ready:
-            self.exec_single_app(app)
-        
+
     def exec_single_app(self, app: application):
         try:
             _, child_conn = self.channels[app.appid]
@@ -150,21 +206,47 @@ class dl_scheduler():
         except Exception as e:
             print("exec app: {}, ".format(app.appid), e)
 
-
-    def pause_world(self):
+    def exec_ready_apps(self):
+        for app in self.app_ready:
+            self.exec_single_app(app)
+        
+    def pause_world(self, to_pause_apps):
+        if self.mode==1:
+            return
         try:
-            for app in self.app_running:
+            for app in to_pause_apps:
                 # get the parent_conn of app
                 parent_conn = self.channels[app.appid][0]
                 # send a pause signal to the child_conn
                 parent_conn.send(conn_message("Pause"))
             # set the number of pause signal in this round 
-            self.paused_signal = len(self.app_running)
+            self.paused_signal = len(to_pause_apps)
         except Exception as e:
             print("Error in pause_world for app {}".format(app.appid), e)
 
     def reallocate_workers(self):
-        pass 
+        if self.mode==1:
+            return [], []
+        # no app should be paused at this stage, app_paused should be thread safe (TODO?)
+        assert(len(self.app_paused)==0)
+        apps = self.app_running + self.app_ready
+        print("old_apps")
+        for app in apps:
+            print("app: {}, app_workers: {}".format(app.appid, app.workers))
+        new_apps, intact_apps = self.tp.worker_allocator(apps, debug=False)
+        print("new_apps")
+        for app in new_apps:
+            print("app: {}, app_workers: {}".format(app.appid, app.workers))
+        to_pause_apps = []
+        to_launch_apps = []
+        for i, app in enumerate(new_apps):
+            if app in self.app_running:
+                to_pause_apps.append(app)
+            elif app in self.app_ready:
+                to_launch_apps.append(app)
+        self.print_apps( to_pause_apps)
+        self.print_apps( to_launch_apps)
+        return to_pause_apps, to_launch_apps
 
     def create_listener(self):
         t = threading.Thread(target=self.event_listener, args=( ), name="listener", daemon=False)
@@ -195,7 +277,7 @@ class dl_scheduler():
                         # if an app is paused, record the app's next start iteration
                         if app_event[1]=="Paused":
                             print("{}: master: {}, receives pause echo: {}".format(datetime.datetime.now(), app.appid, app_event))
-                            app.start_iter = app_event[2]["iter"] + 1 if \
+                            app.start_iter = app_event[2]["iter"] if \
                                                 (app.start_iter==0 or app_event[2]["iter"]<app.start_iter) \
                                                 else app.start_iter
                             self.pause_handler(app)
@@ -213,9 +295,14 @@ class dl_scheduler():
             if not app.appid in self.channels:
                 parent_conn, child_conn = Pipe()
                 self.channels[app.appid] = [parent_conn, child_conn]
-        # if no apps submitted before, directly run apps in app buffer
+        # if no apps submitted before, reallocate workers and run apps in app buffer
         if len(self.app_ready+self.app_paused+self.app_running) == 0:
             self.app_ready.extend(apps)
+            _, to_launch_apps = self.reallocate_workers()
+            for app in self.app_ready:
+                if app in to_launch_apps:
+                    self.app_ready.remove(app)
+                    self.app_ready.append(app)
             self.print_queues()
             self.resume_handler()
         # if there exists apps in running queue:
@@ -224,11 +311,17 @@ class dl_scheduler():
         # 3. append app buffer to ready queue, waiting for resume
         else:
             try:
-                self.reallocate_workers()
-                self.pause_world()
-                # only add app into ready queue, waiting for execution
                 self.app_ready.extend(apps)
+                to_pause_apps, to_launch_apps = self.reallocate_workers()
+                self.pause_world(to_pause_apps)
+                # update ready queue
+                for app in self.app_ready:
+                    if app in to_launch_apps:
+                        self.app_ready.remove(app)
+                        self.app_ready.append(app)
                 self.print_queues()
+                if len(to_pause_apps)==0:
+                    self.resume_handler()
             except Exception as e:
                 print("arrival_handler", e)
         
@@ -249,6 +342,7 @@ class dl_scheduler():
         # if all apps are paused, resume the world
         if (self.paused_signal == self.paused_counter): 
             start = time.time()
+            # with self.lock:
             wait_process_stop([app.process for app in self.app_paused])
             print("pause waiting time: {}".format(time.time() - start))
             self.resume_handler()
@@ -267,13 +361,14 @@ class dl_scheduler():
                 self.app_paused.remove(app)
             self.app_finished.append(app)
             # close conn channels for finished app
-            child_conn, parent_conn = self.channels[app.appid]
-            child_conn.close()
-            parent_conn.close()
+            # child_conn, parent_conn = self.channels[app.appid]
+            # child_conn.close()
+            # parent_conn.close()
             self.print_queues()
             self.finished_count += 1
-            self.reallocate_workers()
-            self.pause_world()
+            if self.mode == 3:
+                to_pause_apps, _ = self.reallocate_workers()
+                self.pause_world(to_pause_apps)
         except Exception as e:
             print("finish_handler", e)
 
@@ -296,11 +391,3 @@ class dl_scheduler():
     def print_queues(self):
         print("ready: {}, running: {}, paused: {}, finished: {}".format([app.appid for app in self.app_ready], [app.appid for app in self.app_running], [app.appid for app in self.app_paused], [app.appid for app in self.app_finished]))
 
-submit_path = "/tmp/home/danlinjia/torchloader/torchloader/dl_scheduler-test.conf.csv"
-ws_conn, sb_conn = Pipe()
-ws = dl_scheduler(ws_conn)
-sb = submitter(submit_path, sb_conn, time_window=5)
-sb.main_fn()
-ws.main_loop_fn()
-# ws.main_loop_fn()
-# ws.exec_single_app(ws.app_infos[0][0])

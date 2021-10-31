@@ -5,6 +5,7 @@ import argparse
 import os
 from posixpath import join
 import random
+from torch.distributed.distributed_c10d import destroy_process_group
 import yaml
 import numpy as np
 from shutil import copyfile
@@ -55,7 +56,7 @@ def conn_message(mesg_type, mesg_data=None):
 class application():
     def __init__(self, appid, arch, depth, batch, workers, work_space, port, \
                 arrival_time=0, cuda_device="0, 1", start_iter=0, start_epoch=1, \
-                end_iter=100, end_epoch=1):
+                end_iter=500, end_epoch=1):
         self.appid = appid
         self.arch = arch
         self.depth = depth
@@ -80,7 +81,7 @@ class application():
 
     def print_info(self):
         print("appid: {}, model: {}{}, batch: {}, workers: {}, output: {}, port: {}, cuda_device: {}" \
-            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.output_folder, self.port, self.cuda_device))
+            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, self.cuda_device))
 
     def init_model(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -162,6 +163,7 @@ class application():
         parser.add_argument('--checkpoint', dest='checkpoint', action='store_false',
                             help="if resume frome a checkpoint")
         parser.add_argument('--start_iteration', default=0, type=int)
+        parser.add_argument("--mode", "-m")
 
         args = parser.parse_args()
         args.appid = self.appid
@@ -176,14 +178,37 @@ class application():
         args.epochs = self.end_epoch
         args.checkpoint = self.checkpoint
         args.start_iteration = self.start_iter
+        args.cuda_device = self.cuda_device
         args.print_freq = 10
         return args
 
 
 def send_pause_to_subprocess(app):
-    for sub_idx in app.subprocess_conns:
+    try:
+        for sub_idx in app.subprocess_conns:
+            if sub_idx != 0:
+                master_conn, _ = app.subprocess_conns[sub_idx]
+                master_conn.send(conn_message("Pause"))
+        sub_idx = 0
         master_conn, _ = app.subprocess_conns[sub_idx]
         master_conn.send(conn_message("Pause"))
+    except Exception as e:
+            print("send pause to {}".format(sub_idx), e)
+
+def send_exit_to_subprocess(app):
+    try:
+        for sub_idx in app.subprocess_conns:
+            master_conn, _ = app.subprocess_conns[sub_idx]
+            master_conn.send(conn_message("Exit"))
+    except Exception as e:
+            print("send exit to {}".format(sub_idx), e)
+
+def send_exit_to_rank0(app):
+    try:
+        master_conn, _ = app.subprocess_conns[0]
+        master_conn.send(conn_message("Exit"))
+    except Exception as e:
+        print("send exit to rank0", e)
 
 def app_messeger(app, child_conn):
     while 1:
@@ -199,39 +224,59 @@ def app_messeger(app, child_conn):
                 sub_event = master_conn.recv()
                 if sub_event[1] == "Paused":
                     app.paused_counter += 1
+                    print("{}: worker: {} receive a pause signal, now counter is {}".format(datetime.datetime.now(), app.appid, app.paused_counter))
                     if app.paused_counter == len(app.cuda_device):
+                        # child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]})) 
+                        send_exit_to_subprocess(app)
+                        print("{}: worker: {} send an exit signal".format(datetime.datetime.now(), app.appid))
                         child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]}))
                         return
+                # if sub_event[1] == "Exited":
+                        
+
                 elif sub_event[1] == "Finished":
                     app.finished_counter += 1
                     if app.finished_counter == len(app.cuda_device):
+                        for s_idx in app.subprocess_conns:
+                            master_conn, worker_conn = app.subprocess_conns[s_idx]
+                            master_conn.close()
+                            worker_conn.close()
+                        try:
+                            dist.destroy_process_group()
+                        except Exception as e:
+                            print("destroy_process_group failed", e)
+
                         child_conn.send(conn_message("Finished"))
                         return
                 elif sub_event[1] == "HeartBeat":
                     child_conn.send(sub_event)
 
 def save_train_model(epoch, iter, model, optimizer, loss, scheduler, args, model_path=''):
-    if model_path=='':
-        model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
-                    args.appid, "gpu{}".format(args.gpu) if args.gpu!=None else "cpu{}".format(args.rank)))
-    # if model_path=='':
-    #     model_path = os.path.join(args.work_space, "app-{}.tar".format(args.appid))
-    torch.save({
-            'iter': iter,
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss,
-            # 'scheduler': scheduler
-            }, model_path)
-    # copyfile(model_path, os.path.join(args.work_space, "app-{}-{}.tar".format(args.appid, datetime.datetime.now())))
+    try:
+        if model_path=='':
+            model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
+                        args.appid, "gpu{}".format(args.gpu) if args.gpu!=None else "cpu{}".format(args.rank)))
+        # if model_path=='':
+        #     model_path = os.path.join(args.work_space, "app-{}.tar".format(args.appid))
+        torch.save({
+                'iter': iter,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss,
+                # 'scheduler': scheduler
+                }, model_path)
+        # copyfile(model_path, os.path.join(args.work_space, "app-{}-{}.tar".format(args.appid, datetime.datetime.now())))
+    except Exception as e:
+        print("app: {} save model".format(args.appid), e)
 
 def resume_train_model(model, optimizer, args, model_path=''):
     if model_path=='':
+        latest_ts = 0
         for f in os.listdir(args.work_space):
             if "app-{}".format(args.appid) in f:
-                model_path = os.path.join(args.work_space, f)
-                break
+                if latest_ts<os.path.getctime(os.path.join(args.work_space, f)):
+                    model_path = os.path.join(args.work_space, f)
         
         # model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
         #             args.appid, "gpu1"))
@@ -249,6 +294,7 @@ def resume_train_model(model, optimizer, args, model_path=''):
         return model, optimizer, epoch, iter, loss#, scheduler
     except Exception as e:
         print(e)
+        raise
 
 def main_worker(gpu, ngpus_per_node, app, args):
     criterion = None
@@ -411,24 +457,33 @@ def main_worker(gpu, ngpus_per_node, app, args):
                 if args.distributed:
                     train_sampler.set_epoch(epoch)
 
+                # reset start_iteration for new epoch
                 if epoch!=e:
                     args.start_iteration = 0
                 # train for one epoch
-                last_iter = train(train_loader, model, criterion, optimizer, scheduler, epoch, sub_conn, args)
+                last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, args)
 
                 if last_iter != args.iteration:
                     epoch_end = time.time()
-                    print("epoch_time for {} iter: {}".format(last_iter, epoch_end - epoch_start))
-                    return
+                    print("app{}-{}: epoch_time for {} iter: {}".format(args.appid, args.rank, last_iter, epoch_end - epoch_start))
+                    while 1:
+                        if sub_conn.poll(timeout=0.01):
+                            message_type = sub_conn.recv()[1]
+                            if message_type == "Exit":
+                                print("{}: worker: {}-{} exit at epoch {} iter {}".format(datetime.datetime.now(), args.appid, args.rank, e, last_iter))
+                                return
+                    # return
+                    
                 # adjust learning rate
                 scheduler.step()
 
                 epoch_end = time.time()
-                print("epoch_time: {}".format(epoch_end - epoch_start))
+                print("app{}-{}: epoch_time: {}".format(args.appid, args.rank, epoch_end - epoch_start))
 
-            sub_conn.send(conn_message("Finished"))
+        sub_conn.send(conn_message("Finished"))
+        
     except Execption as e:
-        print("training: ", e)
+        print("training procedure: ", e)
     
     # else:
     #     if args.profile_batches == -1:
@@ -456,85 +511,98 @@ def main_worker(gpu, ngpus_per_node, app, args):
     #     prof.export_chrome_trace(trace_name)
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, args):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    forward_time = AverageMeter()
-    backward_time = AverageMeter()
-    update_time = AverageMeter()
-    losses = AverageMeter()
-    datatrans_time = AverageMeter()
-    lossupdate_time = AverageMeter()
-    # switch to train mode
-    model.train()
+    try:
+        batch_time = AverageMeter()
+        data_time = AverageMeter()
+        forward_time = AverageMeter()
+        backward_time = AverageMeter()
+        update_time = AverageMeter()
+        losses = AverageMeter()
+        datatrans_time = AverageMeter()
+        lossupdate_time = AverageMeter()
+        # switch to train mode
+        model.train()
 
-    end = time.time()
-    iter_inx =  args.start_iteration
-    for i, (input, target) in enumerate(train_loader):
-        iter_inx += 1
-        if iter_inx != -1 and iter_inx == args.iteration:
-            break
-        # measure data loading time
-        dataloading_ts = time.time()
-        if args.gpu is not None:
-            input = input.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
-        # measure data transfer time
-        datatransfer_ts = time.time()
-        output = model(input)
-        ce_loss = criterion(output, target)
-        forward_ts = time.time()
-        # get loss from GPU, deprecated for performance concern
-        #losses.update(ce_loss.item(), input.size(0))
-        loss_ts = time.time()
-        # compute gradient and do SGD step
-        # replace optimizer.zero_grad(), taking less memory oprations
-        for param in model.parameters():
-            param.grad = None
-        ce_loss.backward()
-        backward_ts = time.time()
-        # update
-        optimizer.step()
-        update_ts = time.time()
-        # measure elapsed time with breakdown
-        start = end
         end = time.time()
-        batch_time.update(end - start)
-        data_time.update(dataloading_ts - start)
-        datatrans_time.update(datatransfer_ts - dataloading_ts)
-        forward_time.update(forward_ts - datatransfer_ts)
-        lossupdate_time.update(loss_ts - forward_ts)
-        backward_time.update(backward_ts - loss_ts)
-        update_time.update(update_ts- backward_ts)
-        # check if to pause in each iteration
-        if conn.poll(timeout=0.01):
-            if conn.recv()[1] == "Pause":
-                print("{}: worker: {} paused at epoch {} iter {}".format(datetime.datetime.now(), args.appid, epoch, i))
-                if args.rank == 1:
-                    save_train_model(epoch, i, model, optimizer, criterion, scheduler, args)
-                conn.send(conn_message("Paused", {"iter":i, "epoch": epoch}))
+        iter_inx =  args.start_iteration
+        for i, (input, target) in enumerate(train_loader):
+            if iter_inx != -1 and iter_inx == args.iteration:
                 break
+            # measure data loading time
+            dataloading_ts = time.time()
+            if args.gpu is not None:
+                input = input.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
+            # measure data transfer time
+            datatransfer_ts = time.time()
+            output = model(input)
+            ce_loss = criterion(output, target)
+            forward_ts = time.time()
+            # get loss from GPU, deprecated for performance concern
+            #losses.update(ce_loss.item(), input.size(0))
+            loss_ts = time.time()
+            # compute gradient and do SGD step
+            # replace optimizer.zero_grad(), taking less memory oprations
+            for param in model.parameters():
+                param.grad = None
+            ce_loss.backward()
+            backward_ts = time.time()
+            # update
+            optimizer.step()
+            update_ts = time.time()
+            # measure elapsed time with breakdown
+            start = end
+            end = time.time()
+            batch_time.update(end - start)
+            data_time.update(dataloading_ts - start)
+            datatrans_time.update(datatransfer_ts - dataloading_ts)
+            forward_time.update(forward_ts - datatransfer_ts)
+            lossupdate_time.update(loss_ts - forward_ts)
+            backward_time.update(backward_ts - loss_ts)
+            update_time.update(update_ts- backward_ts)
 
-        if iter_inx % args.print_freq == 0:
-            print("iteration {} takes {}".format(i, end-start))
-            conn.send(conn_message("HeartBeat", {"epoch":epoch,"iter":iter_inx ,"iter_time":end-start}))
+            if iter_inx % args.print_freq == 0:
+                print("iteration {} takes {}".format(i, end-start))
+                conn.send(conn_message("HeartBeat", 
+                            {"epoch":epoch, "iter": iter_inx ,
+                            "iter_time": np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean(),
+                            "dataloading_time: ": np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean()}))
 
-        
-    df = pd.DataFrame(columns=["iteration","dataloading","datatransfer", "forward","lossupdate", "backward","update","loss"])
-    df["iteration"] = np.array(batch_time.tracker)
-    df["dataloading"] = np.array(data_time.tracker)
-    df["datatransfer"] = np.array(datatrans_time.tracker)
-    df["forward"] = np.array(forward_time.tracker)
-    df["lossupdate"] = np.array(lossupdate_time.tracker)
-    df["backward"] = np.array(backward_time.tracker)
-    df["update"] = np.array(update_time.tracker)
-    #df["loss"] = np.array(losses.tracker[:len(df)])
-    trace_path = os.path.join(args.work_space, "device_{}.csv".format(args.rank))
-    if not os.path.exists(trace_path):
-        df.to_csv(trace_path, index=False)
-    else:
-        previous_df = pd.read_csv(trace_path, header=0)
-        pd.concat([df, previous_df]).to_csv(trace_path, index=False)
-    return iter_inx
+            iter_inx += 1
+
+            # check if to pause in each iteration
+            if conn.poll(timeout=0.01):
+                message_type = conn.recv()[1]
+                if message_type == "Pause":
+                    if args.rank == 1 or len(args.cuda_device)==1:
+                        save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
+                    else:
+                        time.sleep(2)
+                    conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
+                    print("{}: worker: {}-{} send a pause signal".format(datetime.datetime.now(), args.appid, args.rank))
+                    break
+
+
+        # df = pd.DataFrame(columns=["iteration","dataloading","datatransfer", "forward","lossupdate", "backward","update","loss"])
+        # df["iteration"] = np.array(batch_time.tracker)
+        # df["dataloading"] = np.array(data_time.tracker)
+        # df["datatransfer"] = np.array(datatrans_time.tracker)
+        # df["forward"] = np.array(forward_time.tracker)
+        # df["lossupdate"] = np.array(lossupdate_time.tracker)
+        # df["backward"] = np.array(backward_time.tracker)
+        # df["update"] = np.array(update_time.tracker)
+        # #df["loss"] = np.array(losses.tracker[:len(df)])
+        # trace_path = os.path.join(args.work_space, "device_{}.csv".format(args.rank))
+        # if not os.path.exists(trace_path):
+        #     df.to_csv(trace_path, index=False)
+        # else:
+        #     previous_df = pd.read_csv(trace_path, header=0)
+        #     pd.concat([df, previous_df]).to_csv(trace_path, index=False)
+                
+        return iter_inx
+
+    except Exception as e:
+        raise e
 
 def validate( val_loader, model, criterion, args):
     batch_time = AverageMeter()
