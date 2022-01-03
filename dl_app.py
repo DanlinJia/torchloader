@@ -76,14 +76,15 @@ class application():
         self.subprocess_conns = {}
         self.paused_counter = 0
         self.finished_counter = 0
-        self.init_model()
+        # self.logger = logging.getLogger("{}.log".format(self.appid))
+        # self.parse_args()
         # self.best_acc1 = 0
 
     def print_info(self):
         print("appid: {}, model: {}{}, batch: {}, workers: {}, output: {}, port: {}, cuda_device: {}" \
             .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, self.cuda_device))
 
-    def init_model(self):
+    def parse_args(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         model_names = sorted(name for name in models.__dict__
@@ -224,11 +225,11 @@ def app_messeger(app, child_conn):
                 sub_event = master_conn.recv()
                 if sub_event[1] == "Paused":
                     app.paused_counter += 1
-                    print("{}: worker: {} receive a pause signal, now counter is {}".format(datetime.datetime.now(), app.appid, app.paused_counter))
+                    print("worker: {} receive a pause signal, now counter is {}".format(app.appid, app.paused_counter))
                     if app.paused_counter == len(app.cuda_device):
                         # child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]})) 
                         send_exit_to_subprocess(app)
-                        print("{}: worker: {} send an exit signal".format(datetime.datetime.now(), app.appid))
+                        print("worker: {} send an exit signal".format(app.appid))
                         child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]}))
                         return
                 # if sub_event[1] == "Exited":
@@ -564,9 +565,9 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, arg
             if iter_inx % args.print_freq == 0:
                 print("iteration {} takes {}".format(i, end-start))
                 conn.send(conn_message("HeartBeat", 
-                            {"epoch":epoch, "iter": iter_inx ,
+                            {"worker":args.rank, "epoch":epoch, "iter": iter_inx ,
                             "iter_time": np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean(),
-                            "dataloading_time: ": np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean()}))
+                            "dataloading_time": np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean()}))
 
             iter_inx += 1
 
@@ -686,7 +687,7 @@ def accuracy(output, target, topk=(1,)):
 
 def app_main(conn, app: application):
     os.environ["CUDA_VISIBLE_DEVICES"] = " ".join( str(d)+',' for d in app.cuda_device)[:-1]
-    args = app.init_model()
+    args = app.parse_args()
     
     if args.seed is not None:
         random.seed(args.seed)

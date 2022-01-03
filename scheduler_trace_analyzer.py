@@ -1,10 +1,13 @@
 import os
 import re
+import ast
 import pandas as pd
+import numpy as np
 import argparse
 from datetime import datetime
 
 from pandas.core.frame import DataFrame
+from pandas.io.pytables import dropna_doc
 
 parser = argparse.ArgumentParser(description="a trace parser to analyze events in dl_schduler.")
 parser.add_argument("--input", "-i", type=str, help="the even trace path.")
@@ -20,10 +23,10 @@ with open(args.input, "r") as event_trace:
 event_type = ("receives submition", "receives heartbeat", 
                 "receives pause echo", "receives finish echo")
 
-app_events = pd.DataFrame(columns=["appid", "time", "event"])
+app_events = pd.DataFrame(columns=["appid", "time", "event", "message"])
 app_workers = pd.DataFrame(columns=["appid", "time", "pre_workers", "new_workers", "reason"])
 
-def clean_split(s: str, regex=","):
+def clean_split(s, regex=","):
     sl = re.split(regex, s)
     return [s for s in sl if (s!='' and s!='\n')]
 
@@ -34,7 +37,10 @@ def extract_info(s: str):
     t2 = words[1]
     app = words[3]
     t = "{} {}".format(t1, t2[:-1])
-    return t, app
+    if "HeartBeat" in s:
+        event_msg = re.split("\{", event_msg)
+        event_msg = ast.literal_eval("{" + event_msg[-1])
+    return t, app, event_msg
 
 track_old, track_new = False, False
 for l in lines:
@@ -47,7 +53,7 @@ for l in lines:
         t = "{} {}".format(t1, t2[:-1])
         event = "arrival"
         for app in clean_split(apps, regex=' |,'):
-            app_events.loc[len(app_events), :] = [app, t, event]
+            app_events.loc[len(app_events), :] = [app, t, event, None]
         continue
     elif "receives heartbeat" in l:
         event = "heartbeat"
@@ -77,8 +83,8 @@ for l in lines:
         app_workers.loc[(app_workers.appid==clean_split(app, ":")[-1])&(app_workers.time==t), "new_workers"] = clean_split(worker, ":")[-1]
 
     if event!='':
-        t, app = extract_info(l)
-        app_events.loc[len(app_events), :] = [app, t, event]
+        t, app, event_msg = extract_info(l)
+        app_events.loc[len(app_events), :] = [app, t, event, event_msg]
 
 # post-process
 app_workers.loc[app_workers.new_workers==0, "new_workers"] = app_workers.loc[app_workers.new_workers==0, "pre_workers"]
@@ -112,17 +118,51 @@ def calculate_pause_cost(appid: str, app_events: pd.DataFrame):
         pause_df.loc[pause_df.index == pause_idx, "cost"] = next_heartbeat - pause_time
     return pause_df
 
+def get_heartbeat_info(appid:str, app_events: pd.DataFrame):
+    app_df = app_events[app_events.appid==appid]
+    app_df = app_df.reset_index(drop=True)
+    heartbeat_df = app_df.loc[app_df.event=="heartbeat", "message"]
+    heartbeat_df = heartbeat_df.apply(pd.Series)
+    heartbeat_df.epoch = heartbeat_df.epoch.astype(int)
+    heartbeat_df.iter = heartbeat_df.iter.astype(int)
+    heartbeat_df.worker = heartbeat_df.worker.astype(int)
+    heartbeat_df["appid"] = [appid]*len(heartbeat_df)
+    return heartbeat_df
+
 lats = []
 p_costs = []
+heartbeat = []
 for appid in app_events.appid.drop_duplicates().values:
     lats.append(calculate_app_latency(appid, app_events))
     p_costs.append(calculate_pause_cost(appid, app_events))
+    heartbeat.append(get_heartbeat_info(appid, app_events))
 
 lat_df = pd.concat(lats)
-lat_df["tpt"] = 2*500*128/lat_df.latency.apply(lambda x:x.total_seconds())
-print("ave latency: {}, sum tpt: {}".format(lat_df.latency.apply(lambda x:x.total_seconds()).mean(), lat_df.tpt.sum() ))
+
 p_cost_df = pd.concat(p_costs)
 cost_df = p_cost_df[["appid", "cost"]].groupby(by=["appid"], as_index=False).sum()
-lat_df.join(cost_df.set_index("appid"), on="appid").to_csv(path_or_buf=os.path.join( args.output, "lat_df.csv") )
-p_cost_df.to_csv(path_or_buf=os.path.join(args.output, "p_cost_df.csv"))
-app_workers.to_csv(path_or_buf=os.path.join(args.output, "workers.csv"))
+
+heartbeat_df = pd.concat(heartbeat)
+batch_size = 128
+sum_tpt = 0
+tpt_df = pd.DataFrame(columns=["appid", "worker", "mini_batch", "iter_time", "data_time" ,"tpt"])
+for appid in heartbeat_df.appid.drop_duplicates().values:
+    # filter out iteration time larger than 1 second, as such iterations involve initialziation costs
+    app_df = heartbeat_df.loc[(heartbeat_df.appid == appid) & (heartbeat_df.iter_time<1), :]
+    workers = app_df.worker.drop_duplicates().values
+    mini_batch = int(batch_size/len(workers))
+    for worker in workers:
+        worker_df = app_df[app_df.worker==worker]
+        ave_iter_time = worker_df.iter_time.mean()
+        ave_data_time = worker_df.dataloading_time.mean()
+        tpt_df.loc[len(tpt_df), :] = [appid, worker, mini_batch , ave_iter_time, ave_data_time , mini_batch/ave_iter_time]
+        # print("worker: {}, ave_iter_time: {}".format(worker, ave_iter_time))
+aggreagted_tpt_df = tpt_df.groupby(by=["appid"]).sum()
+lat_df = lat_df.join(aggreagted_tpt_df["tpt"], on="appid")
+
+lat_df.to_csv(path_or_buf=os.path.join( args.output, "lat_df.csv"), index=False)
+p_cost_df.to_csv(path_or_buf=os.path.join(args.output, "p_cost_df.csv"), index=False)
+app_workers.to_csv(path_or_buf=os.path.join(args.output, "workers.csv"), index=False)
+heartbeat_df.to_csv(path_or_buf=os.path.join(args.output, "heartbeat.csv"), index=False)
+
+print("ave latency: {}, sum tpt: {}".format(lat_df.latency.apply(lambda x:x.total_seconds()).mean(), lat_df.tpt.sum() ))

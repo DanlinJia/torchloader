@@ -64,9 +64,10 @@ class worker_scheduler():
         df["gpu_x0"] = df.batch/df.num_device*df.ops
         df["gpu_x1"]=(df.num_device-1)*df.params
         df["gpu_x2"]=df.params
+        df["gpu_x3"] = (df.batch_size/df.num_device)*df.params
         # calculate the throughput of a singe dataloader per device
         df["cpu_x0"] = 1/(df.num_device*1)
-        df["gpu_y_"] = df[["gpu_x0", "gpu_x1", "gpu_x2"]].apply(lambda x: self.gpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
+        df["gpu_y_"] = df[["gpu_x0", "gpu_x1", "gpu_x2", "gpu_x3"]].apply(lambda x: self.gpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
         df["gpu_tpt"] = df.batch/df.gpu_y_
         df["cpu_tpt"] = df[["cpu_x0"]].apply(lambda x: 1/self.cpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
         return df

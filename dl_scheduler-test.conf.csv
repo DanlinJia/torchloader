@@ -1,4 +1,4 @@
-arch,depth,batch,workers,output_folder,port,arrival_time,cuda_device
-resnet, 18, 128, 2, "test", 5336, 1, "0 1"
-resnet, 18, 128, 2, "test", 6336, 23, "3"
-
+arch,depth,batch,workers,output_folder,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch
+resnet, 18, 128, 6, "test-3corun-auto-mod3", 5336, 1, "1 0", 0, 1, 500, 1
+smresnet, 20, 128, 6, "test-3corun-auto-mod3", 6336, 1, "1 2", 0, 1, 500, 1
+mdresnet, 12, 128, 6, "test-3corun-auto-mod3", 7336, 1, "0 2", 0, 1, 500, 1

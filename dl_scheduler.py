@@ -170,6 +170,8 @@ class dl_scheduler():
         self.app_paused = []
         # a list of finished applications
         self.app_finished = []
+        # a list of applications to finish
+        self.finish_buffer = []
         # a record of lisenters created for each app
         self.lisenters = {}
         # communication pipe for receiving apps submitions
@@ -185,16 +187,26 @@ class dl_scheduler():
         self.tp = through_predictor
         # global lock to protect spawning application
         self.lock = Lock()
+        # a flag representing the scheduler status
+        # if schduler is in pausing, hold on the following pausing.
+        self.in_pausing = False
         # mode:
         # 1. no worker reallocation
         # 2. reallocate workers for arrival signal
         # 3. reallocate workers for both arrival and finish signals
         self.mode = mode
+        self.logger = logging.getLogger("dl_scheduler.log")
 
+    def init_logger(self):
+        self.logger.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh = logging.FileHandler("dl_scheduler.log")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(formatter)
+        self.logger.addHandler(fh)
 
     def main_loop_fn(self):
         self.create_listener()
-
 
     def exec_single_app(self, app: application):
         try:
@@ -214,6 +226,7 @@ class dl_scheduler():
         if self.mode==1:
             return
         try:
+            self.in_pausing = True
             for app in to_pause_apps:
                 # get the parent_conn of app
                 parent_conn = self.channels[app.appid][0]
@@ -254,6 +267,8 @@ class dl_scheduler():
 
     def event_listener(self):
         event_type = ("Paused", "Finished", "Resume", "Arrival")
+        # use a time window to wait for finished applications
+        finish_window_start = time.time()
         # self.sub_conn.send(["Start"])
         while self.stop_flag != self.finished_count:
             # check the conn channel to submitter
@@ -268,6 +283,7 @@ class dl_scheduler():
                 elif submit_event[1] == "End":
                     self.stop_flag = submit_event[2]
                     print("stop at {}".format(self.stop_flag))
+
             # check communication channel of each app
             for app in self.app_running + self.app_paused:
                 if app.appid in self.channels:
@@ -285,9 +301,19 @@ class dl_scheduler():
                         elif app_event[1]=="Finished":
                             print("{}: master: {}, receives finish echo: {}".format(datetime.datetime.now(), app.appid, app_event))
                             app.finish_time = parser.parse(app_event[0])
-                            self.finish_handler(app)
+                            # trigger finish_handler in 5 seconds after the current app finished
+                            if len(self.finish_buffer)==0:
+                                finish_window_start = time.time()
+                                self.finish_buffer.append(app)
+                            elif time.time() - finish_window_start < 5:
+                                self.finish_buffer.append(app)
+                            else:
+                                self.finish_handler()
+                            print("finish_buffer :", self.finish_buffer)
                         elif app_event[1]=="HeartBeat":
                             print("{}: master: {}, receives heartbeat: {}".format(datetime.datetime.now(), app.appid, app_event))
+            if  len(self.finish_buffer)>0 and time.time() - finish_window_start > 5:
+                self.finish_handler()
 
     def arrival_handler(self, apps):
         # all new app needs to initialize conn channels
@@ -347,25 +373,28 @@ class dl_scheduler():
             print("pause waiting time: {}".format(time.time() - start))
             self.resume_handler()
             self.paused_counter = 0
+            self.in_pausing = False
         # except Exception as e:
         #     print("pause_handler", e)
 
-    def finish_handler(self, app):
+    def finish_handler(self):
         try:
-            # join app process once it reaches to the end
-            app.process.join()
-            # TODO: check if receives paused before finished signal for any app 
-            if app in self.app_running:
-                self.app_running.remove(app)
-            if app in self.app_paused:
-                self.app_paused.remove(app)
-            self.app_finished.append(app)
-            # close conn channels for finished app
-            # child_conn, parent_conn = self.channels[app.appid]
-            # child_conn.close()
-            # parent_conn.close()
+            for app in self.finish_buffer:
+                # join app process once it reaches to the end
+                app.process.join()
+                # TODO: check if receives paused before finished signal for any app 
+                if app in self.app_running:
+                    self.app_running.remove(app)
+                if app in self.app_paused:
+                    self.app_paused.remove(app)
+                self.app_finished.append(app)
+                # close conn channels for finished app
+                # child_conn, parent_conn = self.channels[app.appid]
+                # child_conn.close()
+                # parent_conn.close()
+                self.finished_count += 1
+            self.finish_buffer = []
             self.print_queues()
-            self.finished_count += 1
             if self.mode == 3:
                 to_pause_apps, _ = self.reallocate_workers()
                 self.pause_world(to_pause_apps)
