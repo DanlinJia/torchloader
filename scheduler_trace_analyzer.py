@@ -98,7 +98,10 @@ def calculate_app_latency(appid: str, app_events: pd.DataFrame):
     app_df = app_events[app_events.appid==appid]
     status_df = app_df[~(app_df.event=="heartbeat")]
     arrival_time = status_df.loc[status_df.event=="arrival", "time"].item() 
-    finish_time = status_df.loc[status_df.event=="finish", "time"].item()
+    if (status_df.event=="finish").any()==True:
+        finish_time = status_df.loc[status_df.event=="finish", "time"].item()
+    else:
+        finish_time = arrival_time
     latency_df.loc[len(latency_df), :] = [appid, finish_time - arrival_time]
     return latency_df
 
@@ -129,13 +132,18 @@ def get_heartbeat_info(appid:str, app_events: pd.DataFrame):
     heartbeat_df["appid"] = [appid]*len(heartbeat_df)
     return heartbeat_df
 
+
 lats = []
 p_costs = []
 heartbeat = []
 for appid in app_events.appid.drop_duplicates().values:
-    lats.append(calculate_app_latency(appid, app_events))
-    p_costs.append(calculate_pause_cost(appid, app_events))
-    heartbeat.append(get_heartbeat_info(appid, app_events))
+    try:
+        lats.append(calculate_app_latency(appid, app_events))
+        p_costs.append(calculate_pause_cost(appid, app_events))
+        heartbeat.append(get_heartbeat_info(appid, app_events))
+    except Exception as e:
+        print(e)
+        
 
 lat_df = pd.concat(lats)
 

@@ -148,6 +148,8 @@ class dl_tpt_pridictor():
                 if tpt_df["workers"].iloc[index] > 1:
                     tpt_df["workers"].iloc[index] -= 1
                 index = (index + 1)%len(tpt_df)
+        if debug:
+            print(tpt_df)
         for app in apps:
             new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "num_device"].item()
             if new_workers != app.workers:

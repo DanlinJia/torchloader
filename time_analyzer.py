@@ -36,7 +36,7 @@ parser.add_argument("--folder", default='', type=str)
 args = parser.parse_args()
 
 # $root_folder/$experiment_folder/$app_folder
-root_folder = "/tmp/home/danlinjia/pytorch_test/trace"
+root_folder = "/tmp/home/danlinjia/torchloader/torchloader/trace"
 experiment_folder = "."
 app_folder = "." 
 walk_folder = root_folder
@@ -67,7 +67,7 @@ for trace in device_traces:
     plot_single_device(device_df=device_df.loc[2:, names], fig_path=os.path.join(root_folder, experiment_folder, app_folder, "{}_{}_time_breakdown.png".format(app_folder, device_id)))
 
 statistic_df = statistic_df.sort_values(by=["model","batch_size", "experiment_name" ,"deviceID"])
-statistic_df["throughput"] = statistic_df["batch_size"].astype(float)/statistic_df["ave_iteration"].astype(float)
+statistic_df["throughput"] = statistic_df["num_worker"].astype(float)/statistic_df["ave_iteration"].astype(float)
 if len(args.folder)>0:
     statistic_df.to_csv(os.path.join(root_folder, experiment_folder, "statistics.csv"), index=False)
 else:
