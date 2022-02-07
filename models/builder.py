@@ -3,7 +3,12 @@ import sys
 from models.vanilla_resnet import *
 from models.vgg_grasp import *
 from models.small_model import *
+from models.mobilenetV2_imagenet import MobileNetV2 as mobilenet_v2
 
+from models.cifar.resnet20_cifar10 import resnet20 as resnet20_cifar10
+from models.cifar.resnet32_cifar10_grasp import wide_resnet32_cifar10 as wide_resnet32_cifar10
+from models.cifar.resnet50_cifar10 import ResNet50 as resnet50_cifar10
+from models.cifar.vgg_grasp_cifar10 import vgg11_cifar10, vgg13_cifar10, vgg16_cifar10, vgg19_cifar10
 
 def build_model(arch, depth):
     if arch == "resnet":
@@ -144,6 +149,26 @@ def build_model(arch, depth):
             model = small10()
         else:
             sys.exit("small models doesn't implement those depth!")
+    elif arch == "mobilenet_v2":
+        model = mobilenet_v2()
+
+    # ---------- cifar10 ------------
+    elif arch == "cifar10-resnet":
+        if depth == 20:
+            model = resnet20_cifar10(dataset="cifar10")
+        elif depth == 32:
+            model = wide_resnet32_cifar10(depth=32, dataset='cifar10')
+        elif depth == 50:
+            model = resnet50_cifar10()
+    elif arch == "cifar10-vgg":
+        if depth == 11:
+            model = vgg11_cifar10()
+        elif depth == 13:
+            model = vgg13_cifar10()
+        elif depth == 16:
+            model = vgg16_cifar10()
+        elif depth == 19:
+            model = vgg19_cifar10()
     else:
         sys.exit("unknown network")
 
