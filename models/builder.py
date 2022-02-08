@@ -10,6 +10,10 @@ from models.cifar.resnet32_cifar10_grasp import wide_resnet32_cifar10 as wide_re
 from models.cifar.resnet50_cifar10 import ResNet50 as resnet50_cifar10
 from models.cifar.vgg_grasp_cifar10 import vgg11_cifar10, vgg13_cifar10, vgg16_cifar10, vgg19_cifar10
 
+from models.efficientnet_pytorch import EfficientNet
+from models.googlenet_pytorch import GoogLeNet
+
+
 def build_model(arch, depth):
     if arch == "resnet":
         if depth == 10:
@@ -152,15 +156,28 @@ def build_model(arch, depth):
     elif arch == "mobilenet_v2":
         model = mobilenet_v2()
 
+    elif 'efficientnet' in arch:  # NEW
+        """
+            VALID_MODELS: 
+            'efficientnet-b0', 'efficientnet-b1', 'efficientnet-b2', 'efficientnet-b3',
+            'efficientnet-b4', 'efficientnet-b5', 'efficientnet-b6', 'efficientnet-b7'
+        """
+        print("=> creating model '{}'".format(arch))
+        model = EfficientNet.from_name(arch)
+
+    elif arch == "googlenet":
+        print("=> creating model '{}'".format(arch))
+        model = GoogLeNet.from_name(arch)
+
     # ---------- cifar10 ------------
-    elif arch == "cifar10-resnet":
+    elif arch == "resnet_cifar10":
         if depth == 20:
             model = resnet20_cifar10(dataset="cifar10")
         elif depth == 32:
             model = wide_resnet32_cifar10(depth=32, dataset='cifar10')
         elif depth == 50:
             model = resnet50_cifar10()
-    elif arch == "cifar10-vgg":
+    elif arch == "vgg_cifar10":
         if depth == 11:
             model = vgg11_cifar10()
         elif depth == 13:
@@ -169,6 +186,7 @@ def build_model(arch, depth):
             model = vgg16_cifar10()
         elif depth == 19:
             model = vgg19_cifar10()
+
     else:
         sys.exit("unknown network")
 
