@@ -37,6 +37,9 @@ from models.cifar.resnet32_cifar10_grasp import wide_resnet32_cifar10 as wide_re
 from models.cifar.resnet50_cifar10 import ResNet50 as resnet50_cifar10
 from models.cifar.vgg_grasp_cifar10 import vgg11_cifar10, vgg13_cifar10, vgg16_cifar10, vgg19_cifar10
 
+from models.mobilenetV2_imagenet import MobileNetV2 as mobilenet_v2
+from models.efficientnet_pytorch import EfficientNet
+from models.googlenet_pytorch import GoogLeNet
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR training')
 parser.add_argument('--s', type=float, default=0.0001,
@@ -182,12 +185,16 @@ def main():
     from measure_model import measure_model
 
     measure_df = pd.DataFrame(columns=["model", "params", "flops"])
+    efficient_models = [ "efficientnet-b0", "efficientnet-b1", "efficientnet-b2", "efficientnet-b3", "efficientnet-b4",\
+                        "efficientnet-b5", "efficientnet-b6", "efficientnet-b7"]
     model_names = ["resnet18", "resnet19", "resnet20", "resnet34", "resnet35", "resnet50", "resnet101", "resnet152", \
                     "small2", "small3" ,"small4", "small5", "small6" ,"small7", "small8", "small9" ,"small10", \
-                        "vgg11", "vgg13", "vgg16", "vgg19", "vgg5",  "vgg6",  "vgg7",  "vgg51",  "vgg61",  "vgg71",  "vgg52",  "vgg62",  "vgg72"]
+                        "vgg11", "vgg13", "vgg16", "vgg19", "vgg5",  "vgg6",  "vgg7",  "vgg51",  "vgg61",  "vgg71",  "vgg52",  "vgg62",  "vgg72", 
+                        "mobilenet_v2", "googlenet1"]
     models = [resnet18(), resnet18S(), resnet20(), resnet34(), resnet34S(), resnet50(), resnet101(), resnet152(), \
             small2(), small3(), small4(), small5(), small6(), small7(), small8(), small9(), small10(),\
-            vgg11(), vgg13(), vgg16(), vgg19(), vgg5(), vgg6(), vgg7(), vgg51(), vgg61(), vgg71(), vgg52(), vgg62(), vgg72()]
+            vgg11(), vgg13(), vgg16(), vgg19(), vgg5(), vgg6(), vgg7(), vgg51(), vgg61(), vgg71(), vgg52(), vgg62(), vgg72(),\
+            mobilenet_v2(), GoogLeNet.from_name("googlenet")]
     
     for model_name in ["resnet", "smresnet", "mdresnet"]:
         for i in range(10, 36, 2):
@@ -202,8 +209,11 @@ def main():
         for i in [11, 13, 16, 19]:
             model_names.append("{}{}".format(model_name, i))
     
+    model_names.extend(efficient_models)
+
     models.extend([resnet20_cifar10(dataset="cifar10"), wide_resnet32_cifar10(depth=32, dataset='cifar10'), resnet50_cifar10(), \
                     vgg11_cifar10(), vgg13_cifar10(), vgg16_cifar10(), vgg19_cifar10()])
+    models.extend([EfficientNet.from_name(m) for m in efficient_models])
 
     for model_name, model in zip(model_names, models) :
         print("------------------------------")

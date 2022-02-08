@@ -153,8 +153,11 @@ def build_model(arch, depth):
             model = small10()
         else:
             sys.exit("small models doesn't implement those depth!")
-    elif arch == "mobilenet_v2":
-        model = mobilenet_v2()
+    elif arch == "mobilenet_v":
+        if depth==2:
+            model = mobilenet_v2()
+        else:
+            print("error in creating mobilenet")
 
     elif 'efficientnet' in arch:  # NEW
         """
@@ -163,11 +166,14 @@ def build_model(arch, depth):
             'efficientnet-b4', 'efficientnet-b5', 'efficientnet-b6', 'efficientnet-b7'
         """
         print("=> creating model '{}'".format(arch))
-        model = EfficientNet.from_name(arch)
+        model = EfficientNet.from_name(arch+str(depth))
 
     elif arch == "googlenet":
-        print("=> creating model '{}'".format(arch))
-        model = GoogLeNet.from_name(arch)
+        if depth == 1:
+            print("=> creating model '{}'".format(arch))
+            model = GoogLeNet.from_name(arch)
+        else:
+            print("error in creating googlenet")
 
     # ---------- cifar10 ------------
     elif arch == "resnet_cifar10":
