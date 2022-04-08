@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import time
+import datetime
 from time import strftime
 import logging
 import warnings
@@ -144,7 +145,9 @@ def main():
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
     ngpus_per_node = torch.cuda.device_count()
+    print(f"ngpus_per_node={ngpus_per_node}")
     if args.multiprocessing_distributed:
+        print("multiprocessing_distributed")
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
         args.world_size = ngpus_per_node * args.world_size
@@ -152,6 +155,7 @@ def main():
         # main_worker process function
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
+        print("local mod")
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
@@ -164,14 +168,27 @@ def main_worker(gpu, ngpus_per_node, args):
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
+        local_rank = args.gpu
+        if 'SLURM_NPROCS' in os.environ:
+            ngpus_per_node = torch.cuda.device_count()
+            args.world_size = int(os.environ['SLURM_NPROCS']) * ngpus_per_node # compute world_size for multi-node
+            if 'MASTER_ADDR' not in os.environ:
+                os.environ['MASTER_ADDR'] = os.environ['SLURM_LAUNCH_NODE_IPADDR'] # get master addr
+            args.rank = int(os.environ['SLURM_PROCID']) * ngpus_per_node + local_rank # global rank
+            # args.node_list = os.environ["SLURM_NODELIST"] # All node you are using
+            print("slurm cluster constructed: \n Divice per node: {}, world size: {}, url: {}, local_rank/gpu_id: {}, globale_rank: {}".format(\
+                    ngpus_per_node, args.world_size, args.dist_url,local_rank, args.rank ))
+        else:
+            if args.dist_url == "env://" and args.rank == -1:
+                args.rank = int(os.environ["RANK"])
+            if args.multiprocessing_distributed:
+                # For multiprocessing distributed training, rank needs to be the
+                # global rank among all the processes
+                args.rank = args.rank * ngpus_per_node + gpu
+
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
+                                world_size=args.world_size, rank=args.rank, timeout=datetime.timedelta(seconds=30))
+    
 
     print("=> creating model '{}'".format(args.arch))
     model = build_model(args.arch, args.depth)
@@ -485,75 +502,75 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         os.system("mkdir -p {}".format(args.trace))
     df.to_csv(args.trace + "/device_{}.csv".format(args.rank), index=False)
 
-# def train_profile(train_loader, model, criterion, optimizer, epoch, args):
-#     batch_time = AverageMeter()
-#     data_time = AverageMeter()
-#     forward_time = AverageMeter()
-#     backward_time = AverageMeter()
-#     update_time = AverageMeter()
-#     losses = AverageMeter()
+def train_profile(train_loader, model, criterion, optimizer, epoch, args):
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    forward_time = AverageMeter()
+    backward_time = AverageMeter()
+    update_time = AverageMeter()
+    losses = AverageMeter()
 
-#     # switch to train mode
-#     model.train()
+    # switch to train mode
+    model.train()
 
-#     end = time.time()
-#     for i, (input, target) in enumerate(train_loader):
-#         if i==args.iteration:
-#             break
+    end = time.time()
+    for i, (input, target) in enumerate(train_loader):
+        if i==args.iteration:
+            break
 
-#         # measure data loading time
-#         dataloading_ts = time.time()
-#         data_time.update(dataloading_ts - end)
+        # measure data loading time
+        dataloading_ts = time.time()
+        data_time.update(dataloading_ts - end)
 
-#         if args.gpu is not None:
-#             input = input.cuda(args.gpu, non_blocking=True)
+        if args.gpu is not None:
+            input = input.cuda(args.gpu, non_blocking=True)
 
-#         target = target.cuda(args.gpu, non_blocking=True)
+        target = target.cuda(args.gpu, non_blocking=True)
 
-#         output = model(input)
+        output = model(input)
 
-#         ce_loss = criterion(output, target)
+        ce_loss = criterion(output, target)
 
-#         forward_ts = time.time()
-#         forward_time.update(forward_ts - dataloading_ts)
-#         losses.update(ce_loss.item(), input.size(0))
+        forward_ts = time.time()
+        forward_time.update(forward_ts - dataloading_ts)
+        losses.update(ce_loss.item(), input.size(0))
 
-#         loss_ts = time.time()
-#         # compute gradient and do SGD step
-#         optimizer.zero_grad()
-#         ce_loss.backward()
-#         backward_ts = time.time()
-#         backward_time.update(backward_ts - loss_ts)
+        loss_ts = time.time()
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        ce_loss.backward()
+        backward_ts = time.time()
+        backward_time.update(backward_ts - loss_ts)
 
-#         optimizer.step()
-#         update_time.update(time.time() - backward_ts)
-#         # measure elapsed time
-#         batch_time.update(time.time() - end)
-#         end = time.time()
+        optimizer.step()
+        update_time.update(time.time() - backward_ts)
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
 
-#         # if i % args.print_freq == 0:
-#         #     for param_group in optimizer.param_groups:
-#         #         current_lr = param_group['lr']
-#         #     print('Epoch: [{0}][{1}/{2}] [lr={3}]\t'
-#         #           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-#         #           'DataLoading {data_time.val:.3f} ({data_time.avg:.3f})\t'
-#         #           'Forward {forward_time.val:.3f} ({forward_time.avg:.3f})\t'
-#         #           'Backward {backward_time.val:.3f} ({backward_time.avg:.3f})\t'
-#         #           'Update {update_time.val:.3f} ({update_time.avg:.3f})\t'
-#         #           'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-#         #         .format(epoch, i, len(train_loader), current_lr, batch_time=batch_time,
-#         #         loss=losses, data_time=data_time, forward_time=forward_time, backward_time=backward_time, update_time=update_time))
-#         #     print("cross_entropy loss: {}".format(ce_loss))
-#     df = pd.DataFrame(columns=["iteration","dataloading","forward","backward","update","loss"])
-#     df["iteration"] = np.array(batch_time.tracker)
-#     df["dataloading"] = np.array(data_time.tracker)
-#     df["forward"] = np.array(forward_time.tracker)
-#     df["backward"] = np.array(backward_time.tracker)
-#     df["update"] = np.array(update_time.tracker)
-#     df["loss"] = np.array(losses.tracker)
-#     if not os.path.exists(args.trace):
-#         os.system("mkdir -p {}".format(args.trace))
-#     df.to_csv(args.trace + "/device_{}.csv".format(args.rank), index=False)
+        # if i % args.print_freq == 0:
+        #     for param_group in optimizer.param_groups:
+        #         current_lr = param_group['lr']
+        #     print('Epoch: [{0}][{1}/{2}] [lr={3}]\t'
+        #           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+        #           'DataLoading {data_time.val:.3f} ({data_time.avg:.3f})\t'
+        #           'Forward {forward_time.val:.3f} ({forward_time.avg:.3f})\t'
+        #           'Backward {backward_time.val:.3f} ({backward_time.avg:.3f})\t'
+        #           'Update {update_time.val:.3f} ({update_time.avg:.3f})\t'
+        #           'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+        #         .format(epoch, i, len(train_loader), current_lr, batch_time=batch_time,
+        #         loss=losses, data_time=data_time, forward_time=forward_time, backward_time=backward_time, update_time=update_time))
+        #     print("cross_entropy loss: {}".format(ce_loss))
+    df = pd.DataFrame(columns=["iteration","dataloading","forward","backward","update","loss"])
+    df["iteration"] = np.array(batch_time.tracker)
+    df["dataloading"] = np.array(data_time.tracker)
+    df["forward"] = np.array(forward_time.tracker)
+    df["backward"] = np.array(backward_time.tracker)
+    df["update"] = np.array(update_time.tracker)
+    df["loss"] = np.array(losses.tracker)
+    if not os.path.exists(args.trace):
+        os.system("mkdir -p {}".format(args.trace))
+    df.to_csv(args.trace + "/device_{}.csv".format(args.rank), index=False)
 
 
 def validate(val_loader, model, criterion, args):
