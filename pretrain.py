@@ -376,6 +376,7 @@ def main_worker(gpu, ngpus_per_node, args):
             if args.distributed:
                 train_sampler.set_epoch(epoch)
 
+            print(f"gpu:{args.rank} starts epoch: {epoch}")
             # train for one epoch
             train(train_loader, model, criterion, optimizer, epoch, args)
 
