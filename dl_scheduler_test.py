@@ -8,13 +8,13 @@ parser.add_argument("--mode", "-m")
 
 opts = parser.parse_args()
 
-submit_path = "/tmp/home/danlinjia/torchloader/torchloader/dl_scheduler-test.conf.csv"
+submit_path = "dl_scheduler-test.conf.csv"
 ws_conn, sb_conn = Pipe()
 
 sb = submitter(submit_path, sb_conn, time_window=10)
 tp = dl_tpt_pridictor(cpu_cores=24, gpu_devices=4, model_info_path="models.csv", \
-                        cpu_model_path="/tmp/home/danlinjia/torchloader/torchloader/cpu_model", \
-                        gpu_model_path='/tmp/home/danlinjia/torchloader/torchloader/gpu_model')
+                        cpu_model_path="cpu_model", \
+                        gpu_model_path='gpu_model')
 # mode:
 # 1. no worker reallocation
 # 2. reallocate workers for arrival signal

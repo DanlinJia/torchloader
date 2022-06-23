@@ -23,7 +23,7 @@ fi
 #/tmp/opt/nvidia/nsight-systems/2021.1.1/target-linux-x64/nsys profile
 CUDA_VISIBLE_DEVICES=$cuda_device \
 python3 pretrain.py \
-        ../../datasets/ImageNet/ \
+        /work/yanzhi_group/datasets/imagenet/ \
         --app-id $appid \
         --arch $arch \
         --depth $depth \

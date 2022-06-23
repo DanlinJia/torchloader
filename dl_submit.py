@@ -90,8 +90,7 @@ class worker_scheduler():
         return apps
 
     def submit_single_app(self, app, background=True):
-        command = "docker exec -it -w /tmp/home/danlinjia/pytorch_test danj \
-                bash ./stupid_scripts/submit.sh {} {} {} {} {} {} {} {}" \
+        command = "bash ./submit.sh {} {} {} {} {} {} {} {}" \
                 .format(app.appid, app.arch, app.depth, app.batch, app.workers, app.output_folder, app.port, app.cuda_device)
         try:
             if background:
@@ -117,10 +116,10 @@ class worker_scheduler():
         self.run_apps(apps, background)
 
 
-submit_path = "/home/danlinjia/scripts/dl_submit.conf.csv"
-model_path="/home/danlinjia/pytorch_test/models.csv"
-cpu_model_path="/home/danlinjia/pytorch_test/cpu_model"
-gpu_model_path='/home/danlinjia/pytorch_test/gpu_model'
+submit_path = "dl_submit.conf.csv"
+model_path="models.csv"
+cpu_model_path="cpu_model"
+gpu_model_path='gpu_model'
 # names=["arch", "depth", "batch", "workers", "output_folder", "port", "submit_interval"]
 # df = pd.read_csv(submit_path, header=0, names=names, skipinitialspace=True)
 # apps = {}
@@ -137,9 +136,9 @@ gpu_model_path='/home/danlinjia/pytorch_test/gpu_model'
 #     run_apps(apps_in_run)
     #time.sleep(1200)
 ws = worker_scheduler(cpu_cores=12, gpu_devices=4, \
-                        submit_path="/home/danlinjia/scripts/dl_submit.conf.csv", \
-                        model_path="/home/danlinjia/pytorch_test/models.csv", \
+                        submit_path=submit_path, \
+                        model_path=model_path, \
                         pretrained=False, \
-                        cpu_model_path="/home/danlinjia/pytorch_test/cpu_model", \
-                        gpu_model_path='/home/danlinjia/pytorch_test/gpu_model')
+                        cpu_model_path=cpu_model_path, \
+                        gpu_model_path=gpu_model_path)
 ws.run_apps_from_path(background=False)
