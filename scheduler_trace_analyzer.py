@@ -7,8 +7,8 @@ from datetime import datetime
 from pandas.core.frame import DataFrame
 
 parser = argparse.ArgumentParser(description="a trace parser to analyze events in dl_schduler.")
-parser.add_argument("--input", "-i", type=str, help="the even trace path.")
-parser.add_argument("--output", "-o", type=str, help="the output file (csv).")
+parser.add_argument("--input", "-i", type=str, help="the event log path.")
+parser.add_argument("--output", "-o", type=str, help="the output folder to save parsed information.")
 
 args = parser.parse_args()
 
