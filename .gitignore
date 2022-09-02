@@ -6,6 +6,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+models/__pycache__/
 
 # C extensions
 *.so
