@@ -1,4 +1,5 @@
-arch,depth,batch,workers,output_folder,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch
-resnet, 10, 256, 8, "test-18worker-duo_device-intuitive", 5336, 1, "1 0", 0, 1, 500, 1
-googlenet, 1, 256, 6, "test-18worker-duo_device-intuitive", 7336, 1, "0 2", 0, 1, 500, 1
-vgg, 11, 256, 4, "test-18worker-duo_device-intuitive", 6336, 1, "1 2", 0, 1, 500, 1
+arch,depth,batch,workers,output_folder,master,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch,node_size
+resnet, 10, 512, 16, "test-48worker-2node-mod3",d3093, 12448, 1, ["0 1" "0 1"], 0, 1, 500, 1, 2
+vgg, 11, 512, 16, "test-48worker-2node-mod3",d3093, 23448, 1, ["1 2" "1 2"], 0, 1, 500, 1, 2
+googlenet, 1, 512, 16, "test-48worker-2node-mod3",d3093, 58448,  1, ["0 2" "0 2"], 0, 1, 500, 1, 2
+

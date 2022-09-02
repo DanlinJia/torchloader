@@ -12,6 +12,7 @@ from shutil import copyfile
 # from subprocess import PIPE
 import time, datetime
 from time import strftime
+
 import logging
 import warnings
 import sys
@@ -30,7 +31,7 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 import torch.multiprocessing as mp
 from multiprocessing import Process, Pipe, Lock
-
+import threading
 
 # from models.vanilla_resnet_slow import *
 # resnet34S = resnet34
@@ -51,39 +52,49 @@ import torch.autograd.profiler as profiler
 
 
 def conn_message(mesg_type, mesg_data=None):
-    return [str(datetime.datetime.now()), mesg_type, mesg_data]
+    return {'time': str(datetime.datetime.now()), 'type': mesg_type, 'msg': mesg_data}
+
+def print_app_log(app, log_str):
+    print("{}, worker{}, app {}: {}".format(datetime.datetime.now(), app.node_id, app.appid, log_str) )
 
 class application():
-    def __init__(self, appid, arch, depth, batch, workers, work_space, port, \
-                arrival_time=0, cuda_device="0, 1", start_iter=0, start_epoch=1, \
-                end_iter=500, end_epoch=1):
+    def __init__(self, appid, arch, depth, batch, workers, work_space, master, port, \
+                arrival_time=0, cuda_device=[0, 1], start_iter=0, start_epoch=1, \
+                end_iter=500, end_epoch=1, node_size=1, world_size=1, base_rank=0):
         self.appid = appid
         self.arch = arch
         self.depth = depth
         self.batch = batch
         self.workers = workers
         self.work_space = work_space
+        self.master = master
         self.port = port
         self.arrival_time = arrival_time
         self.cuda_device = cuda_device
+        self.device_num = world_size
         self.process = None
         self.start_iter = start_iter
         self.start_epoch = start_epoch
         self.end_iter = end_iter
         self.end_epoch = end_epoch
+        self.node_size = node_size
+        self.world_size = world_size
+        self.base_rank = base_rank
         self.checkpoint = False
         self.finish_time = -1
         self.subprocess_conns = {}
         self.paused_counter = 0
         self.finished_counter = 0
-        self.init_model()
+        self.node_id = 0
+        # self.logger = logging.getLogger("{}.log".format(self.appid))
+        # self.parse_args()
         # self.best_acc1 = 0
 
     def print_info(self):
-        print("appid: {}, model: {}{}, batch: {}, workers: {}, output: {}, port: {}, cuda_device: {}" \
-            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, self.cuda_device))
+        print("appid: {}, model: {}{}, batch: {}, workers: {}, output: {}, port: {}, cuda_device: {}, world_size: {}, node_size: {}, base_rank: {}" \
+            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, self.cuda_device, self.world_size, self.node_size, self.base_rank))
 
-    def init_model(self):
+    def parse_args(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         model_names = sorted(name for name in models.__dict__
@@ -172,26 +183,47 @@ class application():
         args.batch_size = self.batch
         args.workers = self.workers
         args.work_space = self.work_space
-        args.dist_url = 'tcp://127.0.0.1:{}'.format(self.port)
+        args.dist_url = 'tcp://{}:{}'.format(self.master, self.port)
         args.multiprocessing_distributed = True
         args.iteration = self.end_iter
         args.epochs = self.end_epoch
         args.checkpoint = self.checkpoint
         args.start_iteration = self.start_iter
         args.cuda_device = self.cuda_device
-        args.print_freq = 10
+        args.print_freq = 100
+        args.world_size = self.world_size
         return args
-
+    
+    def attach_node(self, node_id):
+        self.node_id = node_id         
 
 def send_pause_to_subprocess(app):
+    # the number of subprocess of app
+    sub_procs = len(app.subprocess_conns)
     try:
-        for sub_idx in app.subprocess_conns:
-            if sub_idx != 0:
+        if sub_procs > 1:
+            # pause subprocess 1 first, which needs to save the model
+            model_save_conn, _ = app.subprocess_conns[1]
+            
+            # send Pause to all subprocesses to inform that the Pause event starts.
+            for sub_idx in app.subprocess_conns:
                 master_conn, _ = app.subprocess_conns[sub_idx]
+                print_app_log(app, "{} send pause signal to {}th subprocess".format(master_conn, sub_idx))
                 master_conn.send(conn_message("Pause"))
-        sub_idx = 0
-        master_conn, _ = app.subprocess_conns[sub_idx]
-        master_conn.send(conn_message("Pause"))
+            
+        #     # waiting for checkpoint saved
+        #     if model_save_conn.recv():
+        #         app.paused_counter += 1
+            
+        #     # enable other subprocesses to
+        #     for sub_idx in app.subprocess_conns:
+        #         if sub_idx > 1:
+        #             master_conn, _ = app.subprocess_conns[sub_idx]
+        #             master_conn.send(conn_message("Pause"))
+        # sub_idx = 0
+        # master_conn, _ = app.subprocess_conns[sub_idx]
+        # print_app_log(app, "send pause signal to main subprocess ")
+        # master_conn.send(conn_message("Pause"))
     except Exception as e:
             print("send pause to {}".format(sub_idx), e)
 
@@ -210,31 +242,34 @@ def send_exit_to_rank0(app):
     except Exception as e:
         print("send exit to rank0", e)
 
-def app_messeger(app, child_conn):
+def app_messager(app, app_conn):
     while 1:
-        if child_conn.poll():
-            ws_event = child_conn.recv()
-            if ws_event[1] == "Pause":
-                send_pause_to_subprocess(app)
+        if app_conn.poll():
+            ws_event = app_conn.recv()
+            if ws_event['type'] == "Pause":
+                print_app_log(app, "recevives a Pause signal from app_master.")
+                t = threading.Thread(target=send_pause_to_subprocess, args=(app, ), name="pause subprocess", daemon=True)
+                t.start()
+                # send_pause_to_subprocess(app)
             else:
                 print("unknow message")
         for sub_idx in app.subprocess_conns:
             master_conn, _ = app.subprocess_conns[sub_idx]
-            if master_conn.poll():
-                sub_event = master_conn.recv()
-                if sub_event[1] == "Paused":
+            if master_conn.poll(timeout=0.01):
+                try:
+                    sub_event = master_conn.recv()
+                except Exception as e:
+                    continue
+                if sub_event['type'] == "Paused":
                     app.paused_counter += 1
-                    print("{}: worker: {} receive a pause signal, now counter is {}".format(datetime.datetime.now(), app.appid, app.paused_counter))
+                    print("worker: {} receive a pause signal, now counter is {}".format(app.appid, app.paused_counter))
                     if app.paused_counter == len(app.cuda_device):
-                        # child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]})) 
-                        send_exit_to_subprocess(app)
-                        print("{}: worker: {} send an exit signal".format(datetime.datetime.now(), app.appid))
-                        child_conn.send(conn_message("Paused", {"iter": sub_event[2]["iter"] , "epoch":sub_event[2]["epoch"]}))
+                        app_conn.send(conn_message("Paused", {"iter": sub_event['msg']["iter"] , "epoch":sub_event['msg']["epoch"]}))
                         return
-                # if sub_event[1] == "Exited":
-                        
+                    elif app.paused_counter == 1:
+                        send_exit_to_subprocess(app)
 
-                elif sub_event[1] == "Finished":
+                elif sub_event['type'] == "Finished":
                     app.finished_counter += 1
                     if app.finished_counter == len(app.cuda_device):
                         for s_idx in app.subprocess_conns:
@@ -245,30 +280,28 @@ def app_messeger(app, child_conn):
                             dist.destroy_process_group()
                         except Exception as e:
                             print("destroy_process_group failed", e)
-
-                        child_conn.send(conn_message("Finished"))
+                        app_conn.send(conn_message("Finished"))
                         return
-                elif sub_event[1] == "HeartBeat":
-                    child_conn.send(sub_event)
+                elif sub_event['type'] == "HeartBeat":
+                    app_conn.send(sub_event)
 
 def save_train_model(epoch, iter, model, optimizer, loss, scheduler, args, model_path=''):
     try:
         if model_path=='':
             model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
-                        args.appid, "gpu{}".format(args.gpu) if args.gpu!=None else "cpu{}".format(args.rank)))
-        # if model_path=='':
-        #     model_path = os.path.join(args.work_space, "app-{}.tar".format(args.appid))
+                        args.appid, "gpu{}".format(args.gpu) if args.gpu!=None else "cpu{}".format(args.gpu)))
+
+        print(f"save model to {model_path}")
         torch.save({
                 'iter': iter,
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': loss,
-                # 'scheduler': scheduler
                 }, model_path)
-        # copyfile(model_path, os.path.join(args.work_space, "app-{}-{}.tar".format(args.appid, datetime.datetime.now())))
+        print("model is saved to {}".format(model_path))
     except Exception as e:
-        print("app: {} save model".format(args.appid), e)
+        print("app: {}".format(args.appid), e)
 
 def resume_train_model(model, optimizer, args, model_path=''):
     if model_path=='':
@@ -296,13 +329,13 @@ def resume_train_model(model, optimizer, args, model_path=''):
         print(e)
         raise
 
-def main_worker(gpu, ngpus_per_node, app, args):
+def main_worker(local_rank, ngpus_per_node, app, args):
     criterion = None
     scheduler = None
     optimizer = None
     epoch = 1
 
-    args.gpu = gpu
+    args.gpu = local_rank
     
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -314,15 +347,17 @@ def main_worker(gpu, ngpus_per_node, app, args):
             if args.multiprocessing_distributed:
                 # For multiprocessing distributed training, rank needs to be the
                 # global rank among all the processes
-                args.rank = args.rank * ngpus_per_node + gpu
+                global_rank = app.base_rank + local_rank
             # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = 1
-            dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                    world_size=args.world_size, rank=args.rank)
-    except Exeception as e:
+            print("create cluster on {} with {}, having {} processes, current rank is {}" \
+                    .format(args.dist_backend, args.dist_url, args.world_size, global_rank))
+            dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, timeout=datetime.timedelta(seconds=180),
+                                    world_size=args.world_size, rank=global_rank)
+    except Exception as e:
         print("distributed cluster: ", e)
 
     try:
-        print("=> creating model '{}'".format(args.arch))
+        print("=> creating model '{}{}'".format(args.arch, args.depth))
         model = build_model(args.arch, args.depth)
         if args.distributed:
             # For multiprocessing distributed, DistributedDataParallel constructor
@@ -334,8 +369,8 @@ def main_worker(gpu, ngpus_per_node, app, args):
                 # When using a single GPU per process and per
                 # DistributedDataParallel, we need to divide the batch size
                 # ourselves based on the total number of GPUs we have
-                args.batch_size = int(args.batch_size / ngpus_per_node)
-                args.workers = int(args.workers / ngpus_per_node)
+                args.batch_size = int(app.batch / ngpus_per_node)
+                args.workers = int(app.workers / ngpus_per_node)
                 model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
             else:
                 model.cuda()
@@ -440,6 +475,7 @@ def main_worker(gpu, ngpus_per_node, app, args):
         ########################## Get Dataset ###############
 
     try:
+        print("data loading")
         if "cifar10" in args.arch:
             args.dataset="cifar10"
         else:
@@ -448,69 +484,47 @@ def main_worker(gpu, ngpus_per_node, app, args):
     except Exception as e:
         print("dataloading: ", e)
 
-    try:    
-        # training
-        _, sub_conn = app.subprocess_conns[args.rank]
-        if args.profile == False:
-            for e in range(epoch, args.epochs + 1):
-                epoch_start = time.time()
-                if args.distributed:
-                    train_sampler.set_epoch(epoch)
+    # try:    
+    # training
+    print("before training")
+    _, sub_conn = app.subprocess_conns[args.gpu]
+    if sub_conn is None:
+        raise Exception("Sub_conn is None")
+    print("get sub_conn")
+    for e in range(epoch, args.epochs + 1):
+        epoch_start = time.time()
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
 
-                # reset start_iteration for new epoch
-                if epoch!=e:
-                    args.start_iteration = 0
-                # train for one epoch
-                last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, args)
+        # reset start_iteration for new epoch
+        if epoch!=e:
+            args.start_iteration = 0
+        # train for one epoch
+        last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, app, args)
 
-                if last_iter != args.iteration:
-                    epoch_end = time.time()
-                    print("app{}-{}: epoch_time for {} iter: {}".format(args.appid, args.rank, last_iter, epoch_end - epoch_start))
-                    while 1:
-                        if sub_conn.poll(timeout=0.01):
-                            message_type = sub_conn.recv()[1]
-                            if message_type == "Exit":
-                                print("{}: worker: {}-{} exit at epoch {} iter {}".format(datetime.datetime.now(), args.appid, args.rank, e, last_iter))
-                                return
-                    # return
-                    
-                # adjust learning rate
-                scheduler.step()
+        if last_iter != args.iteration:
+            epoch_end = time.time()
+            print_app_log(app, "subprocess {} epoch_time for {} iter {}".format(args.gpu, last_iter, epoch_end - epoch_start))
+            while 1:
+                if sub_conn.poll(timeout=0.01):
+                    message_type = sub_conn.recv()['type']
+                    if message_type == "Exit":
+                        print_app_log(app, "subprocess {} exit at epoch {} iter {}".format(args.gpu, e, last_iter))
+                        return
+            # return
+            
+        # adjust learning rate
+        scheduler.step()
 
-                epoch_end = time.time()
-                print("app{}-{}: epoch_time: {}".format(args.appid, args.rank, epoch_end - epoch_start))
+        epoch_end = time.time()
+        print_app_log(app, "subprocess {} epoch_time {}".format(args.gpu, epoch_end - epoch_start))
 
-        sub_conn.send(conn_message("Finished"))
-        
-    except Execption as e:
-        print("training procedure: ", e)
-    
-    # else:
-    #     if args.profile_batches == -1:
-    #         args.profile_batches = len(train_loader)
+    print_app_log(app, "subprocess {} sends finish signal.".format(args.gpu))
+    sub_conn.send(conn_message("Finished"))
+    # avoid immediate exist, waiting for app_master receiving Finish signal
+    # time.sleep(1)
 
-    #     with profiler.profile(record_shapes=args.record_shapes, profile_memory=args.profile_memory, use_cuda=args.use_cuda) as prof:
-    #         with profiler.record_function(expriment_name):
-    #             for epoch in range(1, args.profile_epochs + 1):
-    #                 epoch_start = time.time()
-    #                 if args.distributed:
-    #                     train_sampler.set_epoch(epoch)
-
-    #                 # train for one epoch
-    #                 train(train_loader, model, criterion, optimizer, epoch, conn, args)
-
-    #                 # adjust learning rate
-    #                 scheduler.step()
-
-    #                 epoch_end = time.time()
-    #                 print("epoch_time: {}".format(epoch_end - epoch_start))
-
-    #     # save profile results
-    #     profile_name = args.profile_name
-    #     trace_name = "{}/{}.json".format(args.work_space, args.rank)
-    #     prof.export_chrome_trace(trace_name)
-
-def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, args):
+def train(train_loader, model, criterion, optimizer, scheduler, epoch ,sub_conn, app, args):
     try:
         batch_time = AverageMeter()
         data_time = AverageMeter()
@@ -523,8 +537,10 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, arg
         # switch to train mode
         model.train()
 
+        
         end = time.time()
         iter_inx =  args.start_iteration
+        print(f"training starts from iteration {iter_inx}")
         for i, (input, target) in enumerate(train_loader):
             if iter_inx != -1 and iter_inx == args.iteration:
                 break
@@ -562,24 +578,36 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, arg
             update_time.update(update_ts- backward_ts)
 
             if iter_inx % args.print_freq == 0:
-                print("iteration {} takes {}".format(i, end-start))
-                conn.send(conn_message("HeartBeat", 
-                            {"epoch":epoch, "iter": iter_inx ,
-                            "iter_time": np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean(),
-                            "dataloading_time: ": np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean()}))
+                print("iteration {} takes {}".format(iter_inx, end-start))
+                sub_conn.send(conn_message("HeartBeat", 
+                            {"worker":int(args.gpu), "app_id":int(args.appid), "epoch":int(epoch), "iter": int(iter_inx),
+                            "iter_time": float(np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean()),
+                            "dataloading_time": float(np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean())}))
 
             iter_inx += 1
 
             # check if to pause in each iteration
-            if conn.poll(timeout=0.01):
-                message_type = conn.recv()[1]
-                if message_type == "Pause":
-                    if args.rank == 1 or len(args.cuda_device)==1:
+            if sub_conn.poll(timeout=0.001):
+                message = sub_conn.recv()
+                print_app_log(app, "subprocess {} receives a mesg {}".format(args.gpu, message))
+                if message['type'] == "Pause":
+                    if args.gpu == 1 or len(args.cuda_device)==1:
                         save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
+                        print_app_log(app, "subprocess {} saves the model.".format(args.gpu))
+                        print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
+                        sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
                     else:
-                        time.sleep(2)
-                    conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
-                    print("{}: worker: {}-{} send a pause signal".format(datetime.datetime.now(), args.appid, args.rank))
+                        print_app_log(app, "subprocess {} waits the main subprocess saving the model.".format(args.gpu, message))
+                    while 1:
+                        if sub_conn.poll(timeout=0.01):
+                            message = sub_conn.recv()
+                            if message['type'] == "Exit":
+                                print_app_log(app, "receives exit")
+                                if args.gpu == 1 or len(args.cuda_device)==1:
+                                    break
+                                print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
+                                sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
+                                break
                     break
 
 
@@ -592,7 +620,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,conn, arg
         # df["backward"] = np.array(backward_time.tracker)
         # df["update"] = np.array(update_time.tracker)
         # #df["loss"] = np.array(losses.tracker[:len(df)])
-        # trace_path = os.path.join(args.work_space, "device_{}.csv".format(args.rank))
+        # trace_path = os.path.join(args.work_space, "device_{}.csv".format(args.gpu))
         # if not os.path.exists(trace_path):
         #     df.to_csv(trace_path, index=False)
         # else:
@@ -684,10 +712,16 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-def app_main(conn, app: application):
+def app_main(worker_conn, app: application):
     os.environ["CUDA_VISIBLE_DEVICES"] = " ".join( str(d)+',' for d in app.cuda_device)[:-1]
-    args = app.init_model()
+    args = app.parse_args()
     
+    # the folder to save log and model checkpoints
+    work_space = os.path.join("trace", args.work_space)
+    if not os.path.exists(work_space):
+        os.system("mkdir -p {}".format(work_space))
+    args.work_space = work_space
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -702,21 +736,17 @@ def app_main(conn, app: application):
         warnings.warn('You have chosen a specific GPU. This will completely '
                     'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-    # ngpus_per_node = torch.cuda.device_count()
+    args.distributed = app.node_size > 1 or args.multiprocessing_distributed
     ngpus_per_node = len(app.cuda_device)
     if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
+        args.world_size = app.world_size
         os.environ['MKL_THREADING_LAYER'] = 'GNU'
         for i in range(ngpus_per_node):
             master_conn, sub_conn = Pipe()
             app.subprocess_conns[i] = (master_conn, sub_conn)
-        p = Process(target=app_messeger, args=(app, conn, ), name="app_messeger_{}".format(app.appid), daemon=False)
+
+        # start a messager to communicate sub_processes
+        p = Process(target=app_messager, args=(app, worker_conn, ), name="app_messeger_{}".format(app.appid), daemon=False)
         p.start()
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
@@ -725,24 +755,5 @@ def app_main(conn, app: application):
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, app, args)
 
-
-# def exec_single_app(app: application, conns):
-#     try:
-#         _, c_conn = conns
-#         # p = Process(target=app_main, args=(child_conn, app,), name="app-{}".format(app.appid), daemon=False)
-#         p = Process(target=app_main, args=(c_conn, app, ), name="app-{}".format(app.appid), daemon=False)
-#         app.process = p
-#         app.process.start()
-#     except Exception as e:
-#         print("exec app: {}, ".format(app.appid), e)
-
 if __name__ == '__main__':
     app_main()
-    # from dl_scheduler import submitter
-    # submit_path = "/tmp/home/danlinjia/torchloader/torchloader/dl_scheduler-test.conf.csv"
-    # ws_conn, sb_conn = Pipe()
-    # sb = submitter(submit_path, sb_conn, time_window=5)
-    # sb.read_app_submissions()
-    # app = sb.app_infos[0]
-    # p_conn, c_conn = Pipe()
-    # app_main(c_conn, app)

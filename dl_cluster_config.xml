@@ -1,0 +1,13 @@
+<?xml version="1.0" ?>
+<cluster_config>
+    <master_config>
+        <master_ip>d3092</master_ip>
+        <master_port>6000</master_port>
+        <authkey>'secret password'</authkey>
+    </master_config>
+    <worker_config>
+        <worker_ip></worker_ip>
+        <worker_rpc_port>6321</worker_rpc_port>
+        <worker_socket_port>7070</worker_socket_port>
+    </worker_config>
+</cluster_config>

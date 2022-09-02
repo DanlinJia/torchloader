@@ -50,7 +50,7 @@ class worker_scheduler():
         if len(df)==0:
             print("Warning: No application submitted")
         for i in range(len(df)):
-            app = application(0, *df.loc[i, :])
+            app = application(i, *df.loc[i, :])
             apps.append(app)
         return apps
     
@@ -64,9 +64,10 @@ class worker_scheduler():
         df["gpu_x0"] = df.batch/df.num_device*df.ops
         df["gpu_x1"]=(df.num_device-1)*df.params
         df["gpu_x2"]=df.params
+        df["gpu_x3"] = (df.batch_size/df.num_device)*df.params
         # calculate the throughput of a singe dataloader per device
         df["cpu_x0"] = 1/(df.num_device*1)
-        df["gpu_y_"] = df[["gpu_x0", "gpu_x1", "gpu_x2"]].apply(lambda x: self.gpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
+        df["gpu_y_"] = df[["gpu_x0", "gpu_x1", "gpu_x2", "gpu_x3"]].apply(lambda x: self.gpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
         df["gpu_tpt"] = df.batch/df.gpu_y_
         df["cpu_tpt"] = df[["cpu_x0"]].apply(lambda x: 1/self.cpu_model.predict(np.array(x).reshape(1, -1))[0], axis=1)
         return df
@@ -90,7 +91,7 @@ class worker_scheduler():
         return apps
 
     def submit_single_app(self, app, background=True):
-        command = "bash ./submit.sh {} {} {} {} {} {} {} {}" \
+        command = "bash submit.sh {} {} {} {} {} {} {} {}" \
                 .format(app.appid, app.arch, app.depth, app.batch, app.workers, app.output_folder, app.port, app.cuda_device)
         try:
             if background:
@@ -107,7 +108,7 @@ class worker_scheduler():
     def run_apps(self, apps, background):
         for app in apps:
             time.sleep(app.wait_time)
-            app.appid = time.time_ns()
+            # app.appid = time.time_ns()
             self.submit_single_app(app, background=background)
 
     def run_apps_from_path(self, background):
@@ -135,7 +136,7 @@ gpu_model_path='gpu_model'
 #     apps[run] = apps_in_run
 #     run_apps(apps_in_run)
     #time.sleep(1200)
-ws = worker_scheduler(cpu_cores=12, gpu_devices=4, \
+ws = worker_scheduler(cpu_cores=96, gpu_devices=8, \
                         submit_path=submit_path, \
                         model_path=model_path, \
                         pretrained=False, \

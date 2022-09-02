@@ -1,0 +1,2 @@
+arch,depth,batch,workers,output_folder,master,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch,world_size
+resnet, 10, 256, 40, test, d3096, 5340, 1, "1 0 2 3", 0, 1, 500, 1, 1

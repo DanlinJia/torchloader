@@ -13,23 +13,7 @@ from multiprocessing import Process, Pipe, Lock
 from dateutil import parser
 from pandas.io.clipboards import read_clipboard
 from dl_app import application, app_main
-
-
-def conn_message(mesg_type, mesg_data=None):
-    return [str(datetime.datetime.now()), mesg_type, mesg_data]
-
-def worker_test_fn(appid, conn, delay=1, start_iter=0):
-    for i in range(start_iter, 10):
-        time.sleep(delay)
-        print("{}: worker: {}, iteration {}".format(datetime.datetime.now(), appid, i))
-        if conn.poll(timeout=0.01):
-            if conn.recv()[0] == "Pause":
-                time_stamp = datetime.datetime.now()
-                conn.send(conn_message("Paused", i))
-                print("{}: worker: {} paused at iter {}".format(time_stamp, appid, i))
-                return 
-    conn.send(conn_message("Finished"))
-    return
+from util import *
 
 class submitter():
     def __init__(self, submit_path, conn, time_window=10):
@@ -49,7 +33,6 @@ class submitter():
     def print_apps_info(self):
         for app in self.apps:
             app.print_info()
-        return 0
 
     def get_app(self):
         return self.apps
@@ -57,7 +40,9 @@ class submitter():
     def read_app_submissions(self):
         # generate a set of applications by reading data from a csv file
         df = pd.read_csv(self.submit_path, header=0, skipinitialspace=True)
-        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: [int(d) for d in x.split(" ")] if (type(x)==str) else [int(x)])
+        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: x.replace(" ", ",") if (type(x)==str) else x)
+        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: [list(eval(device_of_node)) for device_of_node in eval(x)])
+        df["world_size"] = df["cuda_device"].apply(lambda device_list: len([ device for device_of_node in device_list for device in device_of_node]))
         if len(df)==0:
             print("Warning: No application submitted")
         for i in range(len(df)):
@@ -65,13 +50,12 @@ class submitter():
             # self.apps[app.arrival_time].append(app)
             self.apps.append(app)
         self.submisson_num = len(self.apps)
-        return 0
 
     def user_submiter_fn(self):
         def _submit():
             if len(self.buffer)>0:
                 print("{}: submitter submits app {}".format(datetime.datetime.now(), [app.appid for app in self.buffer]))
-                self.conn.send(conn_message("Arrival", self.buffer))
+                self.conn.send(conn_message("Arrival", {'arrival_buffer': self.buffer}))
                 self.buffer = []
         def _inwindow(app_ari, start, end):
             if app_ari >= start and app_ari <= end:
@@ -94,7 +78,7 @@ class submitter():
             time.sleep(self.buffer_size)
             cur_time += self.buffer_size
         _submit()
-        self.conn.send(conn_message("End", self.submisson_num))
+        self.conn.send(conn_message("End", {"app_num": self.submisson_num}))
 
     def main_fn(self):
         submiter_j = threading.Thread(target=self.user_submiter_fn, args=(), name="user_submitter", daemon=True)
@@ -123,29 +107,29 @@ class dl_tpt_pridictor():
             raise
 
     def predict_cpu_tpt(self, app: application):
-        num_device = len(app.cuda_device)
-        cpu_x0 = 1/(num_device)
-        return (1/self.cpu_model.predict(np.array([cpu_x0]).reshape(1, -1))[0])/num_device
+        device_num = app.device_num
+        cpu_x0 = 1/(device_num)
+        return (1/self.cpu_model.predict(np.array([cpu_x0]).reshape(1, -1))[0])/device_num
 
     def predict_gpu_tpt(self, app: application):
         """
         return the maximum throughput an application can achieve on a single device.
         """
-        num_device = len(app.cuda_device)
+        device_num = app.device_num
         model_name = "{}{}".format(app.arch, app.depth)
         flops = self.model_info[self.model_info["model"]==model_name]["flops"].drop_duplicates().item()
         params = self.model_info[self.model_info["model"]==model_name]["params"].drop_duplicates().item()
-        c_flops = self.model_info[self.model_info["model"]==model_name]["C_flops"].drop_duplicates().item()*(app.batch/num_device)
-        pc_flops = self.model_info[self.model_info["model"]==model_name]["PC_flops"].drop_duplicates().item()*(app.batch/num_device)
-        dc_flops = self.model_info[self.model_info["model"]==model_name]["DC_flops"].drop_duplicates().item()*(app.batch/num_device)
-        o_flops = self.model_info[self.model_info["model"]==model_name]["O_flops"].drop_duplicates().item()*(app.batch/num_device)
-        gpu_x0, gpu_x1, gpu_x2, gpu_x3 = app.batch/num_device*flops, (num_device-1)*params, params, app.batch/num_device*params
-        return (app.batch/len(app.cuda_device))/self.gpu_model.predict(np.array([gpu_x1, gpu_x2, gpu_x3, c_flops,pc_flops,dc_flops,o_flops ]).reshape(1, -1))[0]
+        c_flops = self.model_info[self.model_info["model"]==model_name]["C_flops"].drop_duplicates().item()*(app.batch/device_num)
+        pc_flops = self.model_info[self.model_info["model"]==model_name]["PC_flops"].drop_duplicates().item()*(app.batch/device_num)
+        dc_flops = self.model_info[self.model_info["model"]==model_name]["DC_flops"].drop_duplicates().item()*(app.batch/device_num)
+        o_flops = self.model_info[self.model_info["model"]==model_name]["O_flops"].drop_duplicates().item()*(app.batch/device_num)
+        gpu_x0, gpu_x1, gpu_x2, gpu_x3 = app.batch/device_num*flops, (device_num-1)*params, params, app.batch/device_num*params
+        return (app.batch/len(app.cuda_device[0]))/self.gpu_model.predict(np.array([gpu_x1, gpu_x2, gpu_x3, c_flops,pc_flops,dc_flops,o_flops ]).reshape(1, -1))[0]
 
     def count_app_per_device(self, apps):
         apps_count_device = {}
         for app in apps:
-            for d in app.cuda_device:
+            for d in app.cuda_device[0]:
                 if d in apps_count_device:
                     apps_count_device[d] += 1
                 else:
@@ -157,31 +141,31 @@ class dl_tpt_pridictor():
         intact_apps = []
         apps_count_device = self.count_app_per_device(apps)
         
-        tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "workers", "num_device"])
+        tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "workers", "device_num"])
         for app in apps:
-            num_device = len(app.cuda_device)
+            device_num = app.device_num
             cpu_tpt_per_device = self.predict_cpu_tpt(app)
-            gpu_max_tpt = self.predict_gpu_tpt(app) / np.array([ apps_count_device[d] for d in app.cuda_device]).max()
+            gpu_max_tpt = self.predict_gpu_tpt(app) / np.array([ apps_count_device[d] for d in app.cuda_device[0]]).max()
             worker_per_device_float = gpu_max_tpt/cpu_tpt_per_device
             worker_per_device_int = int(worker_per_device_float) + 1
             overload_worker_per_device = worker_per_device_int - worker_per_device_float
             tpt_df.loc[len(tpt_df), :] = [app.appid, gpu_max_tpt, \
                                             cpu_tpt_per_device, worker_per_device_float, \
                                             overload_worker_per_device, worker_per_device_int, \
-                                            num_device]
+                                            device_num]
         if debug:
             print(tpt_df)
-        if (tpt_df["workers"]*tpt_df["num_device"]).sum() > self.cpu_cores:
+        if (tpt_df["workers"]*tpt_df["device_num"]).sum() > self.cpu_cores:
             tpt_df = tpt_df.sort_values(by=["over_w", "cal_w"], ascending=False)
             index = 0
-            while (tpt_df["workers"]*tpt_df["num_device"]).sum() > self.cpu_cores and tpt_df["workers"].sum()!=len(tpt_df):
+            while (tpt_df["workers"]*tpt_df["device_num"]).sum() > self.cpu_cores and tpt_df["workers"].sum()!=len(tpt_df):
                 if tpt_df["workers"].iloc[index] > 1:
                     tpt_df["workers"].iloc[index] -= 1
                 index = (index + 1)%len(tpt_df)
         if debug:
             print(tpt_df)
         for app in apps:
-            new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "num_device"].item()
+            new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "device_num"].item()
             if new_workers != app.workers:
                 diff_apps.append(app)
                 app.workers = new_workers
@@ -191,7 +175,7 @@ class dl_tpt_pridictor():
         
 
 class dl_scheduler():
-    def __init__(self, sub_conn, through_predictor, mode=3):
+    def __init__(self, sub_conn, through_predictor, master=None, mode=3):
         # channels is a appid:[parent_conn, child_conn] mapping directory.
         self.channels = {}
         # a list of ready applications
@@ -204,6 +188,8 @@ class dl_scheduler():
         self.app_finished = []
         # a list of applications to finish
         self.finish_buffer = []
+        # appid to application mapping
+        self.id2app = {}
         # a record of lisenters created for each app
         self.lisenters = {}
         # communication pipe for receiving apps submitions
@@ -222,6 +208,8 @@ class dl_scheduler():
         # a flag representing the scheduler status
         # if schduler is in pausing, hold on the following pausing.
         self.in_pausing = False
+        self.master, self.master_conn = master
+        self.finish_window_size = 20
         # mode:
         # 1. no worker reallocation
         # 2. reallocate workers for arrival signal
@@ -250,9 +238,18 @@ class dl_scheduler():
         except Exception as e:
             print("exec app: {}, ".format(app.appid), e)
 
+    def pause_single_app(self, app:application):
+        # get the parent_conn of app
+        parent_conn = self.channels[app.appid][0]
+        # send a pause signal to the child_conn
+        parent_conn.send(conn_message("Pause"))
+
     def exec_ready_apps(self):
         for app in self.app_ready:
-            self.exec_single_app(app)
+            if not self.master:
+                self.exec_single_app(app)
+            else:
+                self.master.launch_app(app)
         
     def pause_world(self, to_pause_apps):
         if self.mode==1:
@@ -260,11 +257,11 @@ class dl_scheduler():
         try:
             self.in_pausing = True
             for app in to_pause_apps:
-                # get the parent_conn of app
-                parent_conn = self.channels[app.appid][0]
-                # send a pause signal to the child_conn
-                parent_conn.send(conn_message("Pause"))
-            # set the number of pause signal in this round 
+                if not self.master:
+                    self.pause_single_app(app)
+                else:
+                    self.master.pause_app(app)
+            # set the number of pause signal 
             self.paused_signal = len(to_pause_apps)
         except Exception as e:
             print("Error in pause_world for app {}".format(app.appid), e)
@@ -294,10 +291,69 @@ class dl_scheduler():
         return to_pause_apps, to_launch_apps
 
     def create_listener(self):
-        t = threading.Thread(target=self.event_listener, args=( ), name="listener", daemon=False)
+        if not self.master:
+            t = threading.Thread(target=self.event_listener_single_node, args=( ), name="listener", daemon=False)
+        else:
+            t = threading.Thread(target=self.event_listener_master, args=( ), name="listener", daemon=False)
         t.start()
 
-    def event_listener(self):
+    def event_listener_master(self):
+        event_type = ("Paused", "Finished", "Resume", "Arrival")
+        # use a time window to wait for finished applications
+        finish_window_start = time.time()
+        # self.sub_conn.send(["Start"])
+        while self.stop_flag != self.finished_count:
+            # check the conn channel to submitter
+            if self.sub_conn.poll():
+                submit_event = self.sub_conn.recv()
+                # if new app buffer arrivals
+                if submit_event['type'] == "Arrival":
+                    apps = submit_event['msg']['arrival_buffer']
+                    for app in apps:
+                        self.id2app[app.appid] = app
+                    print("{}: master: {}, receives submission.".format(datetime.datetime.now(), [app.appid for app in apps]))
+                    self.arrival_handler(apps)
+                # if no app will come, save the total number of apps submitted
+                elif submit_event['type'] == "End":
+                    self.stop_flag = submit_event['msg']['app_num']
+                    print("submitter submites {} in total".format(self.stop_flag))   
+            
+            # check communication channel to master
+            if self.master_conn.poll():
+                app_event = self.master_conn.recv()
+                event_type = app_event['type']
+                appid = app_event['msg']['app_id']
+                app = self.id2app[appid]
+                if app == None:
+                    raise Exception("app {} not found!".format(appid))
+                # if an app is paused, record the app's next start iteration
+                if event_type=="Paused":
+                    print("{}: master: {}, receives pause echo: [{}]".format(datetime.datetime.now(), appid, app_event))
+                    # app.start_iter = app_event[2]["iter"] if \
+                    #                     (app.start_iter==0 or app_event[2]["iter"]<app.start_iter) \
+                    #                     else app.start_iter
+                    self.pause_handler(app)
+                # if an app is finished
+                elif event_type=="Finished":
+                    print("{}: master: {}, receives finish echo: [{}]".format(datetime.datetime.now(), appid, app_event))
+                    app.finish_time = time.time()
+                    # trigger finish_handler in finish_window_size seconds after the current app finished
+                    if len(self.finish_buffer)==0:
+                        finish_window_start = time.time()
+                        self.finish_buffer.append(app)
+                    elif time.time() - finish_window_start < self.finish_window_size:
+                        self.finish_buffer.append(app)
+                    else:
+                        self.finish_handler()
+                    print("finish_buffer :", self.finish_buffer)
+                elif event_type=="HeartBeat":
+                    # print(msg)
+                    print("{}: master: {}, receives heartbeat: [{}]".format(datetime.datetime.now(), appid, app_event['msg']))
+            if  len(self.finish_buffer)>0 and time.time() - finish_window_start > 5:
+                self.finish_handler()
+
+
+    def event_listener_single_node(self):
         event_type = ("Paused", "Finished", "Resume", "Arrival")
         # use a time window to wait for finished applications
         finish_window_start = time.time()
@@ -309,7 +365,7 @@ class dl_scheduler():
                 # if new app buffer arrivals
                 if submit_event[1] == "Arrival":
                     apps = submit_event[2]
-                    print("{}: master: {}, receives submition.".format(datetime.datetime.now(), [app.appid for app in submit_event[-1]]))
+                    print("{}: master: {}, receives submission.".format(datetime.datetime.now(), [app.appid for app in submit_event[-1]]))
                     self.arrival_handler(apps)
                 # if no app will come, save the total number of apps submitted
                 elif submit_event[1] == "End":
@@ -401,37 +457,34 @@ class dl_scheduler():
         if (self.paused_signal == self.paused_counter): 
             start = time.time()
             # with self.lock:
-            wait_process_stop([app.process for app in self.app_paused])
+            # wait_process_stop([app.process for app in self.app_paused])
             print("pause waiting time: {}".format(time.time() - start))
-            self.resume_handler()
             self.paused_counter = 0
             self.in_pausing = False
+            self.resume_handler()
         # except Exception as e:
         #     print("pause_handler", e)
 
     def finish_handler(self):
-        try:
-            for app in self.finish_buffer:
-                # join app process once it reaches to the end
-                app.process.join()
-                # TODO: check if receives paused before finished signal for any app 
-                if app in self.app_running:
-                    self.app_running.remove(app)
-                if app in self.app_paused:
-                    self.app_paused.remove(app)
-                self.app_finished.append(app)
-                # close conn channels for finished app
-                # child_conn, parent_conn = self.channels[app.appid]
-                # child_conn.close()
-                # parent_conn.close()
-                self.finished_count += 1
-            self.finish_buffer = []
-            self.print_queues()
-            if self.mode == 3:
-                to_pause_apps, _ = self.reallocate_workers()
-                self.pause_world(to_pause_apps)
-        except Exception as e:
-            print("finish_handler", e)
+        for app in self.finish_buffer:
+            # join app process once it reaches to the end
+            # app.process.join()
+            # TODO: check if receives paused before finished signal for any app 
+            if app in self.app_running:
+                self.app_running.remove(app)
+            if app in self.app_paused:
+                self.app_paused.remove(app)
+            self.app_finished.append(app)
+            # close conn channels for finished app
+            # child_conn, parent_conn = self.channels[app.appid]
+            # child_conn.close()
+            # parent_conn.close()
+            self.finished_count += 1
+        self.finish_buffer = []
+        self.print_queues()
+        if self.mode == 3:
+            to_pause_apps, _ = self.reallocate_workers()
+            self.pause_world(to_pause_apps)
 
     def resume_handler(self):
         try:
