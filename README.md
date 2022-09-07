@@ -1,27 +1,27 @@
 # torchloader
 
 ## Architecture
-Torchloader is deployed on a GPU cluster of multiple GPU nodes. Such a cluster contains a cordinator (Master) and multiple worker (Worker) processes. The Master process is selecon can be launched on a GPU or CPU node. Each GPU node joins the cluster by launching a Worker process on it, which manages the resources on the GPU node. Worker processes join the cluster by registering to the Master process. On each worker node (where the Worker processes are launched), an Application Master (AM) is spawned to manage all applications on it.
+Torchloader is deployed on a GPU cluster of multiple GPU nodes. Such a cluster contains a coordinator (Master) and multiple worker (Worker) processes. The Master process is Singleton and can be launched on a GPU or CPU node. Each GPU node joins the cluster by launching a Worker process on it, which manages the resources on the GPU node. Worker processes join the cluster by registering to the Master process. On each worker node (where the Worker processes are launched), an Application Master (AM) is spawned to manage all applications on it.
 
 ## Scheduler
-The scheduler is responsible for launching, pausing and resuming applications by sending signals to the Master process accordingly. The scheduler activates data-loading worker reallocation with help of two modules, Throughput Prediction Model (TPM) and Worker Allocation Algorithm (WAA). When an arrival or departure event occurs, the scheduler uses TPM to predict the number of data-loading workers applications require to achieve the maximum training throughput, and uses WAA to allocate data-loading workers to optimize the overall training throughput (i.e., aggregated throughput of all applications).
+The scheduler is responsible for launching, pausing, and resuming applications by sending signals to the Master process accordingly. The scheduler activates data-loading worker reallocation with the help of two modules, the Throughput Prediction Model (TPM) and Worker Allocation Algorithm (WAA). When an arrival or departure event occurs, the scheduler uses TPM to predict the number of data-loading workers applications required to achieve the maximum training throughput and uses WAA to allocate data-loading workers to optimize the overall training throughput (i.e., aggregated throughput of all applications).
 
 ## Submitter
 The submitter reads a workload configuration file to generate DDL applications. A workload configuration file has the following columns:
-- arch: architecture of the DNN model.
+- arch: the architecture of the DNN model.
 - depth: the layer number of the DNN model.
-- batch: the overall batch size accross all devices on all nodes.
-- workers: the overall workers accross all devices on all nodes.
-- output_folder: the folder to save expermental results with prefix "trace"
-- master: the IP of pytorch master process, which can be any IP of the Worker nodes. 
-- port: the port of pytorch master process's URL.
-- arrival_time: the arrival time of an application, in unit of second.
-- cuda_device: the list of devices used for training the DNN model, each colon pair indicates the device indexes on one node.
+- batch: the overall batch size across all devices on all nodes.
+- workers: the overall workers across all devices on all nodes.
+- output_folder: the folder to save experimental results with the prefix "trace"
+- master: the IP of the pytorch master process, which can be any IP of the Worker nodes. 
+- port: the port of the pytorch master process's URL.
+- arrival_time: the arrival time of an application in a unit of seconds.
+- cuda_device: the list of devices used for training the DNN model. Each colon pair indicates the device indexes on one node.
 - start_iter: the start iteration of training a DNN model, usually is 0.
 - start_epoch: the start epoch of training a DNN model, usually is 1.
 - end_iter: the end iteration of training a DNN model.
-- end_epoch: the end epoch of training a DNN model. The total number of iteration will be the number of epoches times the number of iterations of each epoch.
-- node_size: how many node this application will be distributed across.
+- end_epoch: the end epoch of training a DNN model. The total number of iterations will be the number of epochs times the number of iterations of each epoch.
+- node_size: how many nodes this application will be distributed across.
 
 E.g.,
 ```
