@@ -256,18 +256,15 @@ def app_messager(app, app_conn):
         for sub_idx in app.subprocess_conns:
             master_conn, _ = app.subprocess_conns[sub_idx]
             if master_conn.poll(timeout=0.01):
-                try:
-                    sub_event = master_conn.recv()
-                except Exception as e:
-                    continue
+                sub_event = master_conn.recv()
                 if sub_event['type'] == "Paused":
                     app.paused_counter += 1
                     print("worker: {} receive a pause signal, now counter is {}".format(app.appid, app.paused_counter))
                     if app.paused_counter == len(app.cuda_device):
                         app_conn.send(conn_message("Paused", {"iter": sub_event['msg']["iter"] , "epoch":sub_event['msg']["epoch"]}))
                         return
-                    elif app.paused_counter == 1:
-                        send_exit_to_subprocess(app)
+                    # elif app.paused_counter == 1:
+                    #     send_exit_to_subprocess(app)
 
                 elif sub_event['type'] == "Finished":
                     app.finished_counter += 1
@@ -286,48 +283,47 @@ def app_messager(app, app_conn):
                     app_conn.send(sub_event)
 
 def save_train_model(epoch, iter, model, optimizer, loss, scheduler, args, model_path=''):
-    try:
-        if model_path=='':
-            model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
-                        args.appid, "gpu{}".format(args.gpu) if args.gpu!=None else "cpu{}".format(args.gpu)))
+    if model_path=='':
+        model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
+                    args.appid, "rank{}".format(args.rank) if args.gpu!=None else "cpu{}".format(args.gpu)))
 
-        print(f"save model to {model_path}")
-        torch.save({
-                'iter': iter,
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss,
-                }, model_path)
-        print("model is saved to {}".format(model_path))
-    except Exception as e:
-        print("app: {}".format(args.appid), e)
+    # print(f"save model to {model_path}")
+    torch.save({
+            'iter': iter,
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss,
+            }, model_path)
+    # print("model is saved to {}".format(model_path))
 
 def resume_train_model(model, optimizer, args, model_path=''):
     if model_path=='':
-        latest_ts = 0
-        for f in os.listdir(args.work_space):
-            if "app-{}".format(args.appid) in f:
-                if latest_ts<os.path.getctime(os.path.join(args.work_space, f)):
-                    model_path = os.path.join(args.work_space, f)
+        model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
+                    args.appid, "rank{}".format(0) if args.gpu!=None else "cpu{}".format(args.gpu)))
         
         # model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
         #             args.appid, "gpu1"))
     # if model_path=='':
     #     model_path = os.path.join(args.work_space, "app-{}.tar".format(args.appid))
-    try:
-        print("{} resumes from {}".format(args.appid, model_path))
-        checkpoint = torch.load(model_path)
+
+    print("start resuming")
+    if os.path.exists(model_path):
+        checkpoint = torch.load(model_path, map_location='cuda:{}'.format(args.gpu))
+        print("app{} resumes from {}".format(args.appid, model_path))
+
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("1")
+        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'], strict=False)
+        # print("2")
         epoch = checkpoint['epoch']
         iter = checkpoint['iter']
         loss = checkpoint['loss']
-        # scheduler = checkpoint['scheduler']
-        return model, optimizer, epoch, iter, loss#, scheduler
-    except Exception as e:
-        print(e)
-        raise
+        print("3")
+        return model, optimizer, epoch, iter, loss
+    else:
+        print("Error: No model path at {}".format(model_path))
+
 
 def main_worker(local_rank, ngpus_per_node, app, args):
     criterion = None
@@ -336,301 +332,209 @@ def main_worker(local_rank, ngpus_per_node, app, args):
     epoch = 1
 
     args.gpu = local_rank
-    
-    if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
 
-    try:
-        if args.distributed:
-            if args.dist_url == "env://" and args.rank == -1:
-                args.rank = int(os.environ["RANK"])
-            if args.multiprocessing_distributed:
-                # For multiprocessing distributed training, rank needs to be the
-                # global rank among all the processes
-                global_rank = app.base_rank + local_rank
-            # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = 1
-            print("create cluster on {} with {}, having {} processes, current rank is {}" \
-                    .format(args.dist_backend, args.dist_url, args.world_size, global_rank))
-            dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, timeout=datetime.timedelta(seconds=180),
-                                    world_size=args.world_size, rank=global_rank)
-    except Exception as e:
-        print("distributed cluster: ", e)
+    if args.distributed:
+        if args.dist_url == "env://" and args.rank == -1:
+            args.rank = int(os.environ["RANK"])
+        if args.multiprocessing_distributed:
+            # For multiprocessing distributed training, rank needs to be the
+            # global rank among all the processes
+            global_rank = app.base_rank + local_rank
+            args.rank = global_rank
+        # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = 1
+        print("create cluster on {} with {}, having {} processes, current rank is {}" \
+                .format(args.dist_backend, args.dist_url, args.world_size, global_rank))
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, timeout=datetime.timedelta(seconds=180),
+                                world_size=args.world_size, rank=global_rank)
 
-    try:
-        print("=> creating model '{}{}'".format(args.arch, args.depth))
-        model = build_model(args.arch, args.depth)
-        if args.distributed:
-            # For multiprocessing distributed, DistributedDataParallel constructor
-            # should always set the single device scope, otherwise,
-            # DistributedDataParallel will use all available devices.
-            if args.gpu is not None:
-                torch.cuda.set_device(args.gpu)
-                model.cuda(args.gpu)
-                # When using a single GPU per process and per
-                # DistributedDataParallel, we need to divide the batch size
-                # ourselves based on the total number of GPUs we have
-                args.batch_size = int(app.batch / ngpus_per_node)
-                args.workers = int(app.workers / ngpus_per_node)
-                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-            else:
-                model.cuda()
-                # DistributedDataParallel will divide and allocate batch_size to all
-                # available GPUs if device_ids are not set
-                model = torch.nn.parallel.DistributedDataParallel(model)
-                print("1")
-        elif args.gpu is not None:
+    model = build_model(args.arch, args.depth)
+
+    # if this is a paused app to resmue
+    if app.checkpoint:
+        model, optimizer, epoch, args.start_iteration, criterion = resume_train_model(model, optimizer, args)
+        # criterion.cuda(args.gpu)
+        print("resumes at epoch {} iter{}".format(epoch, args.start_iteration))
+
+    if args.distributed:
+        # For multiprocessing distributed, DistributedDataParallel constructor
+        # should always set the single device scope, otherwise,
+        # DistributedDataParallel will use all available devices.
+        if args.gpu is not None:
             torch.cuda.set_device(args.gpu)
-            model = model.cuda(args.gpu)
+            model.cuda(args.gpu)
+            # When using a single GPU per process and per
+            # DistributedDataParallel, we need to divide the batch size
+            # ourselves based on the total number of GPUs we have
+            args.batch_size = int(app.batch / ngpus_per_node)
+            args.workers = int(app.workers / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+            print("=> model created '{}{}' on GPU {} in DDP".format(args.arch, args.depth, args.gpu))
         else:
-            # DataParallel will divide and allocate batch_size to all available GPUs
-            if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-                model = torch.nn.DataParallel(model)
-                model.cuda()
-                print("2")
-            else:
-                model = torch.nn.DataParallel(model).cuda()
-                print("3")
+            model.cuda()
+            # DistributedDataParallel will divide and allocate batch_size to all
+            # available GPUs if device_ids are not set
+            model = torch.nn.parallel.DistributedDataParallel(model)
+            print("=> model created '{}{}' on all GPUs".format(args.arch, args.depth))
 
-    except Exception as e:
-        print("transport model to GPU", e)
 
     cudnn.benchmark = True
 
-    try:
-        #warmup
-        optimizer_init_lr = args.lr
-    
-        if (args.optimizer == 'sgd'):
-            optimizer = torch.optim.SGD(model.parameters(), lr=optimizer_init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-        elif (args.optimizer == 'adam'):
-            optimizer = torch.optim.Adam(model.parameters(), optimizer_init_lr)
-    except Exeception as e:
-        print("initialize model: ", e)
+    #warmup
+    optimizer_init_lr = args.lr
 
+    if (args.optimizer == 'sgd'):
+        optimizer = torch.optim.SGD(model.parameters(), lr=optimizer_init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    elif (args.optimizer == 'adam'):
+        optimizer = torch.optim.Adam(model.parameters(), optimizer_init_lr)
 
-    # if this is a paused app to resmue
-    try:
-        if app.checkpoint:
-            model, optimizer, epoch, args.start_iteration, criterion = resume_train_model(model, optimizer, args)
-            criterion.cuda(args.gpu)
-            print("resumes at epoch {} iter{}".format(epoch, args.start_iteration))
-    except Exception as e:
-        print("read checkpoint: ", e)
-        
     if scheduler == None:
-        try:
-            #  scheduler
-            if args.lr_scheduler == 'cosine':
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=4e-08)
-            elif args.lr_scheduler == 'default':
-                # my learning rate scheduler for cifar, following https://github.com/kuangliu/pytorch-cifar
-                epoch_milestones = [60, 120]
-                """Set the learning rate of each parameter group to the initial lr decayed
-                    by gamma once the number of epoch reaches one of the milestones
-                """
-                scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=epoch_milestones, gamma=0.1)
-            else:
-                raise Exception("unknown lr scheduler")
-        except Exception as e:
-            print("scheduler: ", e)
-        
+        #  scheduler
+        if args.lr_scheduler == 'cosine':
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=4e-08)
+        elif args.lr_scheduler == 'default':
+            # my learning rate scheduler for cifar, following https://github.com/kuangliu/pytorch-cifar
+            epoch_milestones = [60, 120]
+            """Set the learning rate of each parameter group to the initial lr decayed
+                by gamma once the number of epoch reaches one of the milestones
+            """
+            scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=epoch_milestones, gamma=0.1)
+        else:
+            raise Exception("unknown lr scheduler")
+
     if criterion==None:
         # define loss function (criterion)
         criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-        # Data loading code
-        # traindir = os.path.join(args.data, 'train')
-        # valdir = os.path.join(args.data, 'val')
-        # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-        #                                  std=[0.229, 0.224, 0.225])
-
-        # train_dataset = datasets.ImageFolder(
-        #     traindir,
-        #     transforms.Compose([
-        #         transforms.RandomResizedCrop(224),
-        #         transforms.RandomHorizontalFlip(),
-        #         transforms.ToTensor(),
-        #         normalize,
-        #     ]))
-
-        # if args.distributed:
-        #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        # else:
-        #     train_sampler = None
-
-        # train_loader = torch.utils.data.DataLoader(
-        #     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        #     num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-
-        # val_loader = torch.utils.data.DataLoader(
-        #     datasets.ImageFolder(valdir, transforms.Compose([
-        #         transforms.Resize(256),
-        #         transforms.CenterCrop(224),
-        #         transforms.ToTensor(),
-        #         normalize,
-        #     ])),
-        #     batch_size=args.batch_size, shuffle=False,
-        #     num_workers=args.workers, pin_memory=True)
-
-        ########################## Get Dataset ###############
-
-    try:
-        print("data loading")
-        if "cifar10" in args.arch:
-            args.dataset="cifar10"
-        else:
-            args.dataset="imagenet"
-        train_loader, test_loader, train_sampler = get_dataset(args)
-    except Exception as e:
-        print("dataloading: ", e)
-
-    # try:    
+    ########################## Get Dataset ###############
+    print("data loading")
+    if "cifar10" in args.arch:
+        args.dataset="cifar10"
+    else:
+        args.dataset="imagenet"
+    train_loader, test_loader, train_sampler = get_dataset(args)
+  
     # training
-    print("before training")
     _, sub_conn = app.subprocess_conns[args.gpu]
     if sub_conn is None:
         raise Exception("Sub_conn is None")
     print("get sub_conn")
-    for e in range(epoch, args.epochs + 1):
-        epoch_start = time.time()
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
+    try:
+        for e in range(epoch, args.epochs + 1):
+            epoch_start = time.time()
+            if args.distributed:
+                train_sampler.set_epoch(epoch)
+            print("shuffling")
+            # reset start_iteration for new epoch
+            if epoch!=e:
+                args.start_iteration = 0
+            # train for one epoch
+            last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, app, args)
 
-        # reset start_iteration for new epoch
-        if epoch!=e:
-            args.start_iteration = 0
-        # train for one epoch
-        last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, app, args)
+            if last_iter != args.iteration:
+                epoch_end = time.time()
+                print_app_log(app, "subprocess {} epoch_time for {} iter {}".format(args.gpu, last_iter, epoch_end - epoch_start))
+                # while 1:
+                #     if sub_conn.poll(timeout=0.01):
+                #         message_type = sub_conn.recv()['type']
+                #         if message_type == "Exit":
+                #             print_app_log(app, "subprocess {} exit at epoch {} iter {}".format(args.gpu, e, last_iter))
+                #             return
+                return
+                
+            # adjust learning rate
+            scheduler.step()
 
-        if last_iter != args.iteration:
             epoch_end = time.time()
-            print_app_log(app, "subprocess {} epoch_time for {} iter {}".format(args.gpu, last_iter, epoch_end - epoch_start))
-            while 1:
-                if sub_conn.poll(timeout=0.01):
-                    message_type = sub_conn.recv()['type']
-                    if message_type == "Exit":
-                        print_app_log(app, "subprocess {} exit at epoch {} iter {}".format(args.gpu, e, last_iter))
-                        return
-            # return
-            
-        # adjust learning rate
-        scheduler.step()
-
-        epoch_end = time.time()
-        print_app_log(app, "subprocess {} epoch_time {}".format(args.gpu, epoch_end - epoch_start))
+            print_app_log(app, "subprocess {} epoch_time {}".format(args.gpu, epoch_end - epoch_start))
+    except Exception as e:
+        print("error!\n")
+        raise Exception(e)
 
     print_app_log(app, "subprocess {} sends finish signal.".format(args.gpu))
     sub_conn.send(conn_message("Finished"))
-    # avoid immediate exist, waiting for app_master receiving Finish signal
-    # time.sleep(1)
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch ,sub_conn, app, args):
-    try:
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        forward_time = AverageMeter()
-        backward_time = AverageMeter()
-        update_time = AverageMeter()
-        losses = AverageMeter()
-        datatrans_time = AverageMeter()
-        lossupdate_time = AverageMeter()
-        # switch to train mode
-        model.train()
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    forward_time = AverageMeter()
+    backward_time = AverageMeter()
+    update_time = AverageMeter()
+    losses = AverageMeter()
+    datatrans_time = AverageMeter()
+    lossupdate_time = AverageMeter()
+    # switch to train mode
+    model.train()
 
-        
+    end = time.time()
+    iter_inx =  args.start_iteration
+    print(f"training starts from iteration {iter_inx}")
+    for i, (input, target) in enumerate(train_loader):
+        if iter_inx != -1 and iter_inx == args.iteration:
+            break
+        # measure data loading time
+        dataloading_ts = time.time()
+        if args.gpu is not None:
+            input = input.cuda(args.gpu, non_blocking=True)
+        target = target.cuda(args.gpu, non_blocking=True)
+        # measure data transfer time
+        datatransfer_ts = time.time()
+        output = model(input)
+        ce_loss = criterion(output, target)
+        forward_ts = time.time()
+        # get loss from GPU, deprecated for performance concern
+        #losses.update(ce_loss.item(), input.size(0))
+        loss_ts = time.time()
+        # compute gradient and do SGD step
+        # replace optimizer.zero_grad(), taking less memory oprations
+        for param in model.parameters():
+            param.grad = None
+        ce_loss.backward()
+        backward_ts = time.time()
+        # update
+        optimizer.step()
+        update_ts = time.time()
+        # measure elapsed time with breakdown
+        start = end
         end = time.time()
-        iter_inx =  args.start_iteration
-        print(f"training starts from iteration {iter_inx}")
-        for i, (input, target) in enumerate(train_loader):
-            if iter_inx != -1 and iter_inx == args.iteration:
-                break
-            # measure data loading time
-            dataloading_ts = time.time()
-            if args.gpu is not None:
-                input = input.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
-            # measure data transfer time
-            datatransfer_ts = time.time()
-            output = model(input)
-            ce_loss = criterion(output, target)
-            forward_ts = time.time()
-            # get loss from GPU, deprecated for performance concern
-            #losses.update(ce_loss.item(), input.size(0))
-            loss_ts = time.time()
-            # compute gradient and do SGD step
-            # replace optimizer.zero_grad(), taking less memory oprations
-            for param in model.parameters():
-                param.grad = None
-            ce_loss.backward()
-            backward_ts = time.time()
-            # update
-            optimizer.step()
-            update_ts = time.time()
-            # measure elapsed time with breakdown
-            start = end
-            end = time.time()
-            batch_time.update(end - start)
-            data_time.update(dataloading_ts - start)
-            datatrans_time.update(datatransfer_ts - dataloading_ts)
-            forward_time.update(forward_ts - datatransfer_ts)
-            lossupdate_time.update(loss_ts - forward_ts)
-            backward_time.update(backward_ts - loss_ts)
-            update_time.update(update_ts- backward_ts)
+        batch_time.update(end - start)
+        data_time.update(dataloading_ts - start)
+        datatrans_time.update(datatransfer_ts - dataloading_ts)
+        forward_time.update(forward_ts - datatransfer_ts)
+        lossupdate_time.update(loss_ts - forward_ts)
+        backward_time.update(backward_ts - loss_ts)
+        update_time.update(update_ts- backward_ts)
 
-            if iter_inx % args.print_freq == 0:
-                print("iteration {} takes {}".format(iter_inx, end-start))
-                sub_conn.send(conn_message("HeartBeat", 
-                            {"worker":int(args.gpu), "app_id":int(args.appid), "epoch":int(epoch), "iter": int(iter_inx),
-                            "iter_time": float(np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean()),
-                            "dataloading_time": float(np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean())}))
+        if iter_inx % args.print_freq == 0:
+            print("iteration {} takes {}".format(iter_inx, end-start))
+            sub_conn.send(conn_message("HeartBeat", 
+                        {"worker":int(args.gpu), "app_id":int(args.appid), "epoch":int(epoch), "iter": int(iter_inx),
+                        "iter_time": float(np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean()),
+                        "dataloading_time": float(np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean())}))
 
-            iter_inx += 1
+        # if iter_inx % 30 == 0 and args.rank == 0:
+        #     save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
 
+        iter_inx += 1
+
+        try:
             # check if to pause in each iteration
             if sub_conn.poll(timeout=0.001):
                 message = sub_conn.recv()
                 print_app_log(app, "subprocess {} receives a mesg {}".format(args.gpu, message))
                 if message['type'] == "Pause":
-                    if args.gpu == 1 or len(args.cuda_device)==1:
+                    print("rank is {}, {}".format(args.rank, {"iter":iter_inx, "epoch": epoch}))
+                    if args.rank == 0:
                         save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
-                        print_app_log(app, "subprocess {} saves the model.".format(args.gpu))
-                        print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
-                        sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
-                    else:
-                        print_app_log(app, "subprocess {} waits the main subprocess saving the model.".format(args.gpu, message))
-                    while 1:
-                        if sub_conn.poll(timeout=0.01):
-                            message = sub_conn.recv()
-                            if message['type'] == "Exit":
-                                print_app_log(app, "receives exit")
-                                if args.gpu == 1 or len(args.cuda_device)==1:
-                                    break
-                                print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
-                                sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
-                                break
+                    # dist.barrier() # async_op=False,
+                    sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
+                    print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
                     break
+        except Exception as e:
+            print("errors!")
+            raise Exception(e)
 
+    return iter_inx
 
-        # df = pd.DataFrame(columns=["iteration","dataloading","datatransfer", "forward","lossupdate", "backward","update","loss"])
-        # df["iteration"] = np.array(batch_time.tracker)
-        # df["dataloading"] = np.array(data_time.tracker)
-        # df["datatransfer"] = np.array(datatrans_time.tracker)
-        # df["forward"] = np.array(forward_time.tracker)
-        # df["lossupdate"] = np.array(lossupdate_time.tracker)
-        # df["backward"] = np.array(backward_time.tracker)
-        # df["update"] = np.array(update_time.tracker)
-        # #df["loss"] = np.array(losses.tracker[:len(df)])
-        # trace_path = os.path.join(args.work_space, "device_{}.csv".format(args.gpu))
-        # if not os.path.exists(trace_path):
-        #     df.to_csv(trace_path, index=False)
-        # else:
-        #     previous_df = pd.read_csv(trace_path, header=0)
-        #     pd.concat([df, previous_df]).to_csv(trace_path, index=False)
-                
-        return iter_inx
-
-    except Exception as e:
-        raise e
 
 def validate( val_loader, model, criterion, args):
     batch_time = AverageMeter()

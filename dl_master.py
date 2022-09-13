@@ -51,7 +51,6 @@ class dl_master():
                     worker_info = msg['msg']
                     self.register_worker(worker_info)
                 elif msg['type'] == 'Paused':
-                    print("Paused")
                     self.listener.send_json(conn_message("Paused_ack"))
                     app_id = msg['msg']['app_id']
                     worker_id = msg['msg']['worker_id']
@@ -63,7 +62,6 @@ class dl_master():
                         self.app_event_count[app_id] += 1
 
                 elif msg['type'] == 'Finished':
-                    print("Finished")
                     self.listener.send_json(conn_message("Finished_ack"))
                     app_id = msg['msg']['app_id']
                     worker_id = msg['msg']['worker_id']
@@ -181,3 +179,5 @@ if __name__=="__main__":
     sb = submitter(submit_path, sb_conn, time_window=10)
     sb.read_app_submissions()
     apps = sb.apps
+
+    app = apps[0]

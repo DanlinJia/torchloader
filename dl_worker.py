@@ -95,20 +95,20 @@ class dl_worker():
 
     def listener_thread(self):
         while True:
-            try:
-                # Wait for next request from server 
-                msg = self.listener.recv_json()
-                print(f"Received request: {msg}")
-                if msg['type']=='app':
-                    app = self.receive_app_handler()
-                if msg['type']=='Launch':
-                    app = self.launch_app_handler()
-                if msg['type']=='Pause':
-                    app_id = msg['msg']['app_id']
-                    self.pause_handler(app_id)
+            # try:
+            # Wait for next request from server 
+            msg = self.listener.recv_json()
+            print(f"Received request: {msg}")
+            if msg['type']=='app':
+                app = self.receive_app_handler()
+            if msg['type']=='Launch':
+                app = self.launch_app_handler()
+            if msg['type']=='Pause':
+                app_id = msg['msg']['app_id']
+                self.pause_handler(app_id)
 
-            except Exception as e:
-                print(msg, e) 
+            # except Exception as e:
+            #     print(msg, e) 
 
     def launch_listener(self):
         t = threading.Thread(target=self.listener_thread, args=( ), name="worker_listener", daemon=False)
@@ -146,7 +146,7 @@ class dl_worker():
     def pause_handler(self, app_id):
         self.listener.send_json(conn_message("Pause_ack"))
         m_conn = self.app_master.app_warehouse[app_id]['conn']
-        app_pid = self.app_master.app_warehouse[app_id]['pid']
+        app_pid = self.app_master.app_warehouse[app_id]['process'].pid
         print("worker{} sends pause to app{} ".format(self.worker_ip, app_id))
         m_conn.send(conn_message("Pause"))
 
@@ -187,34 +187,39 @@ class application_master():
         # self.sub_conn.send(["Start"])
         while 1:
             # check communication channel of each app
-            # try:
-            app_ids = [app_id for app_id in self.app_warehouse.keys() if self.app_warehouse[app_id]["status"]=="R" ]
-            for app_id in app_ids:
-                m_conn = self.app_warehouse[app_id]['conn']
-                if m_conn.poll():
-                    self.lock.acquire()
-                    app_event = m_conn.recv()
-                    self.lock.release()
-                    # if an app is paused, record the app's next start iteration
-                    if app_event['type']=="Paused":
-                        print("{}: worker{}: {}, receives pause echo: {}".format(datetime.datetime.now(), self.worker.worker_ip ,app_id, app_event))
-                        paused_iter = app_event['msg']["iter"]
-                        print("pasued_iter {}".format(paused_iter))
-                        wait_process_to_stop(self.app_warehouse[app_id]["process"])
-                        self.running_app -= 1
-                        self.app_warehouse[app_id]["status"] = "P"
-                        del self.app_warehouse[app_id]
-                        self.worker.send_paused_signal(app_id)
-                    #if an app is finished
-                    elif app_event['type']=="Finished":
-                        print("{}: worker{}: {}, receives finish echo: {}".format(datetime.datetime.now(), self.worker.worker_ip , app_id, app_event))
-                        self.running_app -= 1
-                        self.app_warehouse[app_id]["status"] = "F"
-                        del self.app_warehouse[app_id]
-                        self.worker.send_finished_signal(app_id)
-                    elif app_event['type']=="HeartBeat":
-                        # print(app_event)
-                        self.worker.send_heartbeat(app_event)
+            try:
+                app_ids = [app_id for app_id in self.app_warehouse.keys() if self.app_warehouse[app_id]["status"]=="R" ]
+                for app_id in app_ids:
+                    if self.app_warehouse[app_id]["status"] == "P" or self.app_warehouse[app_id]["status"] == "F":
+                        continue
+                    m_conn = self.app_warehouse[app_id]['conn']
+                    if m_conn.poll():
+                        self.lock.acquire()
+                        app_event = m_conn.recv()
+                        self.lock.release()
+                        # if an app is paused, record the app's next start iteration
+                        if app_event['type']=="Paused":
+                            print("{}: worker{}: {}, receives pause echo: {}".format(datetime.datetime.now(), self.worker.worker_ip ,app_id, app_event))
+                            paused_iter = app_event['msg']["iter"]
+                            wait_processes_to_stop(self.app_warehouse[app_id]["process"])
+                            print("all subprocess paused")
+                            self.running_app -= 1
+                            self.app_warehouse[app_id]["status"] = "P"
+                            del self.app_warehouse[app_id]
+                            self.worker.send_paused_signal(app_id)
+                        #if an app is finished
+                        elif app_event['type']=="Finished":
+                            print("{}: worker{}: {}, receives finish echo: {}".format(datetime.datetime.now(), self.worker.worker_ip , app_id, app_event))
+                            self.running_app -= 1
+                            self.app_warehouse[app_id]["status"] = "F"
+                            del self.app_warehouse[app_id]
+                            self.worker.send_finished_signal(app_id)
+                        elif app_event['type']=="HeartBeat":
+                            # print(app_event)
+                            self.worker.send_heartbeat(app_event)
+            except Exception as e:
+                print("errors!")
+                raise Exception(e)
 
             if(self.running_app==0):
                 break
