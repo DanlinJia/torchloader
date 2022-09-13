@@ -20,6 +20,6 @@ tp = dl_tpt_pridictor(cpu_cores=24, gpu_devices=4, model_info_path="models.csv",
 # 2. reallocate workers for arrival signal
 # 3. reallocate workers for both arrival and finish signals
 print(opts.mode)
-ws = dl_scheduler(ws_conn, tp, 2)
+ws = dl_scheduler(ws_conn, tp, 3)
 sb.main_fn()
 ws.main_loop_fn()

@@ -1,4 +1,6 @@
 arch,depth,batch,workers,output_folder,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch
-resnet, 10, 256, 8, "test-18worker-duo_device-intuitive", 5336, 1, "1 0", 0, 1, 500, 1
-googlenet, 1, 256, 6, "test-18worker-duo_device-intuitive", 7336, 1, "0 2", 0, 1, 500, 1
-vgg, 11, 256, 4, "test-18worker-duo_device-intuitive", 6336, 1, "1 2", 0, 1, 500, 1
+vgg, 13, 256, 36, "dynamic_w1", 8337, 0, "0 1", 0, 1, 1000, 1
+googlenet, 1, 256, 36, "dynamic_w1", 6336, 60, "0 1", 0, 1, 1000, 1
+resnet, 10, 256, 36, "dynamic_w1", 5337, 120, "0 1", 0, 1, 1000, 1
+
+

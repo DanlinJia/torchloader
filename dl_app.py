@@ -185,6 +185,7 @@ class application():
 
 def send_pause_to_subprocess(app):
     try:
+        print("send pause to {}".format(app.appid))
         for sub_idx in app.subprocess_conns:
             if sub_idx != 0:
                 master_conn, _ = app.subprocess_conns[sub_idx]

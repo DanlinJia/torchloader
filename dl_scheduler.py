@@ -257,17 +257,14 @@ class dl_scheduler():
     def pause_world(self, to_pause_apps):
         if self.mode==1:
             return
-        try:
-            self.in_pausing = True
-            for app in to_pause_apps:
-                # get the parent_conn of app
-                parent_conn = self.channels[app.appid][0]
-                # send a pause signal to the child_conn
-                parent_conn.send(conn_message("Pause"))
-            # set the number of pause signal in this round 
-            self.paused_signal = len(to_pause_apps)
-        except Exception as e:
-            print("Error in pause_world for app {}".format(app.appid), e)
+        self.in_pausing = True
+        for app in to_pause_apps:
+            # get the parent_conn of app
+            parent_conn = self.channels[app.appid][0]
+            # send a pause signal to the child_conn
+            parent_conn.send(conn_message("Pause"))
+        # set the number of pause signal in this round 
+        self.paused_signal = len(to_pause_apps)
 
     def reallocate_workers(self):
         if self.mode==1:
