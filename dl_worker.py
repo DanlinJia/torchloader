@@ -172,6 +172,7 @@ class application_master():
     def __init__(self):
         # maintain imformation about app id, process, pipe
         self.app_warehouse = {}
+        self.app_checkpoint_path = {}
         self.running_app = 0
         self.worker = None
         self.lock = threading.Lock()
@@ -202,6 +203,7 @@ class application_master():
                             print("{}: worker{}: {}, receives pause echo: {}".format(datetime.datetime.now(), self.worker.worker_ip ,app_id, app_event))
                             paused_iter = app_event['msg']["iter"]
                             wait_processes_to_stop(self.app_warehouse[app_id]["process"])
+                            self.app_checkpoint_path[app_id] = app_event['msg']['checkpoint']
                             print("all subprocess paused")
                             self.running_app -= 1
                             self.app_warehouse[app_id]["status"] = "P"
@@ -232,6 +234,8 @@ class application_master():
     
     def launch_app(self, app):
         m_conn, app_conn = Pipe()
+        if app.checkpoint and (app.checkpoint_path==""):
+            app.checkpoint_path = self.app_checkpoint_path[app.appid]
         app_proc = self.spawn_app(app, app_conn)
         self.lock.acquire()
         self.app_warehouse[app.appid] = {"conn": m_conn, "process": app_proc, "status": "R"}

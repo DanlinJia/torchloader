@@ -255,14 +255,15 @@ class dl_scheduler():
         if self.mode==1:
             return
         try:
-            self.in_pausing = True
-            for app in to_pause_apps:
-                if not self.master:
-                    self.pause_single_app(app)
-                else:
-                    self.master.pause_app(app)
-            # set the number of pause signal 
-            self.paused_signal = len(to_pause_apps)
+            while not self.in_pausing:
+                self.in_pausing = True
+                for app in to_pause_apps:
+                    if not self.master:
+                        self.pause_single_app(app)
+                    else:
+                        self.master.pause_app(app)
+                # set the number of pause signal 
+                self.paused_signal = len(to_pause_apps)
         except Exception as e:
             print("Error in pause_world for app {}".format(app.appid), e)
 
