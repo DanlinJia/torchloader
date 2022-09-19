@@ -1,87 +1,62 @@
 # torchloader
 
-The goal of this project is to maximize overall throughput by tuning the number of workers (i.e., data loaders) for submitted applications.
+## Architecture
+Torchloader is deployed on a GPU cluster of multiple GPU nodes. Such a cluster contains a coordinator (Master) and multiple worker (Worker) processes. The Master process is Singleton and can be launched on a GPU or CPU node. Each GPU node joins the cluster by launching a Worker process on it, which manages the resources on the GPU node. Worker processes join the cluster by registering to the Master process. On each worker node (where the Worker processes are launched), an Application Master (AM) is spawned to manage all applications on it.
 
-### Project Roadmap:
-1. running deep learning applications with different combinations of parameters.
-2. modeling throughput of CPU-GPU clusters.
-3. use throughput model to automatically tune the number of workers.
+## Scheduler
+The scheduler is responsible for launching, pausing, and resuming applications by sending signals to the Master process accordingly. The scheduler activates data-loading worker reallocation with the help of two modules, the Throughput Prediction Model (TPM) and Worker Allocation Algorithm (WAA). When an arrival or departure event occurs, the scheduler uses TPM to predict the number of data-loading workers applications required to achieve the maximum training throughput and uses WAA to allocate data-loading workers to optimize the overall training throughput (i.e., aggregated throughput of all applications).
 
-### Tools:
-- `pretain.py` is the pytorch application code used to traine models, which receives a set of arguments. Check the usage of `pretain.py` with the following command.
-```sh
-python3 pretain.py --help
+## Submitter
+The submitter reads a workload configuration file to generate DDL applications. A workload configuration file has the following columns:
+- arch: the architecture of the DNN model.
+- depth: the layer number of the DNN model.
+- batch: the overall batch size across all devices on all nodes.
+- workers: the overall workers across all devices on all nodes.
+- output_folder: the folder to save experimental results with the prefix "trace"
+- master: the IP of the pytorch master process, which can be any IP of the Worker nodes. 
+- port: the port of the pytorch master process's URL.
+- arrival_time: the arrival time of an application in a unit of seconds.
+- cuda_device: the list of devices used for training the DNN model. Each colon pair indicates the device indexes on one node.
+- start_iter: the start iteration of training a DNN model, usually is 0.
+- start_epoch: the start epoch of training a DNN model, usually is 1.
+- end_iter: the end iteration of training a DNN model.
+- end_epoch: the end epoch of training a DNN model. The total number of iterations will be the number of epochs times the number of iterations of each epoch.
+- node_size: how many nodes this application will be distributed across.
+
+E.g.,
+```
+arch,depth,batch,workers,output_folder,master,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch,node_size
+resnet, 10, 512, 16, "test-48worker-2node-mod3",d3093, 12448, 1, ["0 1" "0 1"], 0, 1, 500, 1, 2
+vgg, 11, 512, 16, "test-48worker-2node-mod3",d3093, 23448, 1, ["1 2" "1 2"], 0, 1, 500, 1, 2
+googlenet, 1, 512, 16, "test-48worker-2node-mod3",d3093, 58448,  1, ["0 2" "0 2"], 0, 1, 500, 1, 2
 ```
 
-- `submit.sh` is a bash script wrapper on `pretain.py`, which exposes a subset of arguments to users, e.g., 
-
-```sh
-Usage: 
-- submit.sh <appid> <arch> <depth> <batch> <workers> <folder> <port> <cuda_device>
-
-Example:
-- bash submit.sh 0 resnet 18 128 16 ./out_put_folder 5663 '0,1,2,3' 
+## Quick Start
+1. From the discovery gateway, allocate two nodes.
 ```
-
-- `dl_submit.py'.` is an application dispatcher, which reads applications' info from `dl_submit.conf.csv` and calls `submit.sh` to lauch applications. Please edit `dl_submit.conf.csv` before running `dl_submit.py'.
-```sh
-python3 dl_submit.sh
+salloc -N 2 -p ce-mri --gres=gpu:v100:4 --exclusive
 ```
-- `dl_submit.conf.csv` is a csv file containing applications' info, where each row is an application, and each column is a parameter of the application. `output_folder` specifies which folder the stats should save. `submit_interval` gives the interval between current application with the last one. `cuda_device` sets the GPUs to use. e.g.,
-
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,0,"0"
-resnet,14,128,1,single_1workers_1device,5336,0,"0"
+2. SSH to all nodes. Do the following on each node.
 ```
-The calling order is `dl_submit.py` to `submit.sh`, then to `pretain.py`.
-
-`dl_submit.py` can run applications simutaneously or sequentially, based on the paramerter set in code `worker_scheduler.run_apps_from_path(background=False)`. If `backgoud` is set to `True`, all applications in `dl_submit.conf.csv` should run simutaneously, othervise applications are running in sequential.
-
-Examples:
-1. submit three sequential applications:
-set `dl_submit.conf.csv`
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,0,"0"
-resnet,14,128,1,single_1workers_1device,5336,0,"0"
-resnet,16,128,1,single_1workers_1device,5336,0,"0"
+cd torchloader
+conda activate pytorch_env
 ```
-change the code in `dl_submit.py` to  `worker_scheduler.run_apps_from_path(background=False)`
-
-2. submit three simutaneous applications:
-set `dl_submit.conf.csv`
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,0,"0"
-resnet,14,128,1,single_1workers_1device,5337,0,"0"
-resnet,16,128,1,single_1workers_1device,5338,0,"0"
+3. SSH to the node as master. Do the followings:
+'''
+cd torchloader
+conda activate pytorch_env
+'''
+4. Modify cluster config file in dl_cluster_config.xml. Set master_ip to the master ip/hostname.
+5. On master:
 ```
-change the code in `dl_submit.py` to  `worker_scheduler.run_apps_from_path(background=True)`. Note that the port number of three applications should be different.
-
-3. submit applications in 10 second interval simutaneously/sequentially:
-set `dl_submit.conf.csv`
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,10,"0"
-resnet,14,128,1,single_1workers_1device,5337,10,"0"
-resnet,16,128,1,single_1workers_1device,5338,10,"0"
+python3 -i dl_scheduler_test.py
 ```
-
-3. submit applications in different intervals simutaneously/sequentially:
-set `dl_submit.conf.csv`
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,10,"0"
-resnet,14,128,1,single_1workers_1device,5337,20,"0"
-resnet,16,128,1,single_1workers_1device,5338,30,"0"
+6. On each Worker:
 ```
-
-4. submit applications to different GPU devices simutaneously/sequentially:
-set `dl_submit.conf.csv`
-```sh
-arch,depth,batch,workers,output_folder,port,submit_interval,cuda_device
-resnet,12,128,1,single_1workers_1device,5336,0,"0 1"
-resnet,14,128,1,single_1workers_1device,5337,0,"0 2"
-resnet,16,128,1,single_1workers_1device,5338,0,"3 4"
+python3 -i dl_worker.py
+```
+7. On master Python terminal:
+```
+sb.main_fn()
+ws.main_loop_fn()
 ```
