@@ -54,8 +54,10 @@ python3 -i dl_scheduler_test.py
 6. On each Worker:
 ```
 python3 -i dl_worker.py
+# Important: execute above command on pytorch application master first. 
+# The pytorch application master can be found in "dl_scheduler-test.conf.csv" under "master" column.
 ```
-Important: execute above command on pytorch application master first. The pytorch application master can be found in "dl_scheduler-test.conf.csv" under "master" column.
+
 7. On master Python terminal:
 ```
 run()
