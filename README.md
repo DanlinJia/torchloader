@@ -55,8 +55,8 @@ python3 -i dl_scheduler_test.py
 ```
 python3 -i dl_worker.py
 ```
+Important: execute above command on pytorch application master first. The pytorch application master can be found in "dl_scheduler-test.conf.csv" under "master" column.
 7. On master Python terminal:
 ```
-sb.main_fn()
-ws.main_loop_fn()
+run()
 ```

@@ -5,7 +5,6 @@ import argparse
 import os
 from posixpath import join
 import random
-from torch.distributed.distributed_c10d import destroy_process_group
 import yaml
 import numpy as np
 from shutil import copyfile
@@ -13,6 +12,7 @@ from shutil import copyfile
 import time, datetime
 from time import strftime
 
+import traceback
 import logging
 import warnings
 import sys
@@ -81,6 +81,7 @@ class application():
         self.world_size = world_size
         self.base_rank = base_rank
         self.checkpoint = False
+        self.checkpoint_path = ""
         self.finish_time = -1
         self.subprocess_conns = {}
         self.paused_counter = 0
@@ -197,261 +198,258 @@ class application():
     def attach_node(self, node_id):
         self.node_id = node_id         
 
-def send_pause_to_subprocess(app):
-    # the number of subprocess of app
-    sub_procs = len(app.subprocess_conns)
+def broadcast_message(app, message, sub_idxs=None, debug=True):
+    if not sub_idxs:
+        sub_idxs = app.subprocess_conns
     try:
-        if sub_procs > 1:
-            # pause subprocess 1 first, which needs to save the model
-            model_save_conn, _ = app.subprocess_conns[1]
-            
-            # send Pause to all subprocesses to inform that the Pause event starts.
-            for sub_idx in app.subprocess_conns:
-                master_conn, _ = app.subprocess_conns[sub_idx]
-                print_app_log(app, "{} send pause signal to {}th subprocess".format(master_conn, sub_idx))
-                master_conn.send(conn_message("Pause"))
-            
-        #     # waiting for checkpoint saved
-        #     if model_save_conn.recv():
-        #         app.paused_counter += 1
-            
-        #     # enable other subprocesses to
-        #     for sub_idx in app.subprocess_conns:
-        #         if sub_idx > 1:
-        #             master_conn, _ = app.subprocess_conns[sub_idx]
-        #             master_conn.send(conn_message("Pause"))
-        # sub_idx = 0
-        # master_conn, _ = app.subprocess_conns[sub_idx]
-        # print_app_log(app, "send pause signal to main subprocess ")
-        # master_conn.send(conn_message("Pause"))
-    except Exception as e:
-            print("send pause to {}".format(sub_idx), e)
-
-def send_exit_to_subprocess(app):
-    try:
-        for sub_idx in app.subprocess_conns:
+        for sub_idx in sub_idxs:
             master_conn, _ = app.subprocess_conns[sub_idx]
-            master_conn.send(conn_message("Exit"))
-    except Exception as e:
-            print("send exit to {}".format(sub_idx), e)
+            master_conn.send(conn_message(message))
+            if debug:
+                print_app_log(app, "send {} to {}-{}".format(message, app, sub_idx))
 
-def send_exit_to_rank0(app):
-    try:
-        master_conn, _ = app.subprocess_conns[0]
-        master_conn.send(conn_message("Exit"))
     except Exception as e:
-        print("send exit to rank0", e)
+            print("Error: fail to send {} to {}-{}".format(message, app, sub_idx))
+            print(e)
+
+def send_pause_to_subprocess(app):
+    broadcast_message(app, "Pause")
+
+def app_exit(app):
+    for s_idx in app.subprocess_conns:
+        master_conn, worker_conn = app.subprocess_conns[s_idx]
+        master_conn.close()
+        worker_conn.close()
+    try:
+        dist.destroy_process_group()
+    except Exception as e:
+        print("destroy_process_group failed", e)
 
 def app_messager(app, app_conn):
+    paused_ack_count = 0
+    saved_state = None
+    rank_to_save_model = 0  
     while 1:
         if app_conn.poll():
             ws_event = app_conn.recv()
+            # app_conn receives messages sent by application master
             if ws_event['type'] == "Pause":
                 print_app_log(app, "recevives a Pause signal from app_master.")
                 t = threading.Thread(target=send_pause_to_subprocess, args=(app, ), name="pause subprocess", daemon=True)
                 t.start()
-                # send_pause_to_subprocess(app)
             else:
                 print("unknow message")
-        for sub_idx in app.subprocess_conns:
-            master_conn, _ = app.subprocess_conns[sub_idx]
-            if master_conn.poll(timeout=0.01):
-                sub_event = master_conn.recv()
-                if sub_event['type'] == "Paused":
-                    app.paused_counter += 1
-                    print("worker: {} receive a pause signal, now counter is {}".format(app.appid, app.paused_counter))
-                    if app.paused_counter == len(app.cuda_device):
-                        app_conn.send(conn_message("Paused", {"iter": sub_event['msg']["iter"] , "epoch":sub_event['msg']["epoch"]}))
-                        return
-                    # elif app.paused_counter == 1:
-                    #     send_exit_to_subprocess(app)
 
-                elif sub_event['type'] == "Finished":
-                    app.finished_counter += 1
-                    if app.finished_counter == len(app.cuda_device):
-                        for s_idx in app.subprocess_conns:
-                            master_conn, worker_conn = app.subprocess_conns[s_idx]
-                            master_conn.close()
-                            worker_conn.close()
-                        try:
-                            dist.destroy_process_group()
-                        except Exception as e:
-                            print("destroy_process_group failed", e)
-                        app_conn.send(conn_message("Finished"))
-                        return
-                elif sub_event['type'] == "HeartBeat":
-                    app_conn.send(sub_event)
+        for sub_idx in app.subprocess_conns:
+            try:
+                master_conn, _ = app.subprocess_conns[sub_idx]
+                if master_conn.poll(timeout=0.01):
+                    sub_event = master_conn.recv()
+                    if sub_event['type'] == "Paused_ACK":
+                        current_iter = sub_event['msg']['iter']
+                        if paused_ack_count==0:
+                            min_iter = current_iter
+                        paused_ack_count += 1
+                        if current_iter < min_iter:
+                            rank_to_save_model = sub_idx  
+                    if sub_event['type'] == "Saved":
+                        print("model is saved by {}-{}".format(app.appid, sub_idx))
+                        saved_state = {"iter": sub_event['msg']["iter"] , \
+                                        "epoch": sub_event['msg']["epoch"], \
+                                        "checkpoint": sub_event['msg']['checkpoint']}
+                        broadcast_message(app, "Exit")
+                    if sub_event['type'] == "Paused":
+                        app.paused_counter += 1
+                        print("worker: {} receive a pause signal, now counter is {}".format(app.appid, app.paused_counter))
+                        if app.paused_counter == len(app.cuda_device):
+                            app_exit(app)
+                            assert(saved_state!=None)
+                            app_conn.send(conn_message("Paused", saved_state))
+                            saved_state = None
+                            rank_to_save_model = 0 
+                            return
+                    elif sub_event['type'] == "Finished":
+                        app.finished_counter += 1
+                        if app.finished_counter == len(app.cuda_device):
+                            app_exit(app)
+                            app_conn.send(conn_message("Finished"))
+                            return
+                    elif sub_event['type'] == "HeartBeat":
+                        app_conn.send(sub_event)
+                
+                if paused_ack_count == len(app.subprocess_conns):
+                    paused_ack_count = 0
+                    master_conn, _ = app.subprocess_conns[rank_to_save_model]
+                    master_conn.send(conn_message("Save"))
+
+            except Exception as e:
+                print("Error: fails to receive message from {}-{}".format(app.appid, sub_idx))
+                print(e)
+                print(traceback.format_exc())
 
 def save_train_model(epoch, iter, model, optimizer, loss, scheduler, args, model_path=''):
     if model_path=='':
         model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
                     args.appid, "rank{}".format(args.rank) if args.gpu!=None else "cpu{}".format(args.gpu)))
-
-    # print(f"save model to {model_path}")
-    torch.save({
-            'iter': iter,
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss,
-            }, model_path)
-    # print("model is saved to {}".format(model_path))
+    try:
+        torch.save({
+                'iter': iter,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss,
+                }, model_path)
+        return model_path
+        # print("model is saved to {}".format(model_path))
+    except Exception as e:
+        print("Error: saving model to {}".format(model_path))
+        print(e)
 
 def resume_train_model(model, optimizer, args, model_path=''):
-    if model_path=='':
-        model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
-                    args.appid, "rank{}".format(0) if args.gpu!=None else "cpu{}".format(args.gpu)))
-        
-        # model_path = os.path.join(args.work_space, "app-{}-{}.tar".format(
-        #             args.appid, "gpu1"))
-    # if model_path=='':
-    #     model_path = os.path.join(args.work_space, "app-{}.tar".format(args.appid))
-
-    print("start resuming")
+    print("app{} resumes from {}".format(args.appid, model_path))
     if os.path.exists(model_path):
-        checkpoint = torch.load(model_path, map_location='cuda:{}'.format(args.gpu))
-        print("app{} resumes from {}".format(args.appid, model_path))
-
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        print("1")
-        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'], strict=False)
-        # print("2")
-        epoch = checkpoint['epoch']
-        iter = checkpoint['iter']
-        loss = checkpoint['loss']
-        print("3")
-        return model, optimizer, epoch, iter, loss
+        try:
+            checkpoint = torch.load(model_path, map_location='cuda:{}'.format(args.gpu))
+            print("1")
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            epoch = checkpoint['epoch']
+            iter = checkpoint['iter']
+            loss = checkpoint['loss']
+            return model, optimizer, epoch, iter, loss
+        except Exception as e:
+            print("Error: model resume failed")
+            print(e)
     else:
         print("Error: No model path at {}".format(model_path))
 
 
 def main_worker(local_rank, ngpus_per_node, app, args):
-    criterion = None
-    scheduler = None
-    optimizer = None
-    epoch = 1
-
-    args.gpu = local_rank
-
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            global_rank = app.base_rank + local_rank
-            args.rank = global_rank
-        # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = 1
-        print("create cluster on {} with {}, having {} processes, current rank is {}" \
-                .format(args.dist_backend, args.dist_url, args.world_size, global_rank))
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, timeout=datetime.timedelta(seconds=180),
-                                world_size=args.world_size, rank=global_rank)
-
-    model = build_model(args.arch, args.depth)
-
-    # if this is a paused app to resmue
-    if app.checkpoint:
-        model, optimizer, epoch, args.start_iteration, criterion = resume_train_model(model, optimizer, args)
-        # criterion.cuda(args.gpu)
-        print("resumes at epoch {} iter{}".format(epoch, args.start_iteration))
-
-    if args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(app.batch / ngpus_per_node)
-            args.workers = int(app.workers / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-            print("=> model created '{}{}' on GPU {} in DDP".format(args.arch, args.depth, args.gpu))
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
-            print("=> model created '{}{}' on all GPUs".format(args.arch, args.depth))
-
-
-    cudnn.benchmark = True
-
-    #warmup
-    optimizer_init_lr = args.lr
-
-    if (args.optimizer == 'sgd'):
-        optimizer = torch.optim.SGD(model.parameters(), lr=optimizer_init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif (args.optimizer == 'adam'):
-        optimizer = torch.optim.Adam(model.parameters(), optimizer_init_lr)
-
-    if scheduler == None:
-        #  scheduler
-        if args.lr_scheduler == 'cosine':
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=4e-08)
-        elif args.lr_scheduler == 'default':
-            # my learning rate scheduler for cifar, following https://github.com/kuangliu/pytorch-cifar
-            epoch_milestones = [60, 120]
-            """Set the learning rate of each parameter group to the initial lr decayed
-                by gamma once the number of epoch reaches one of the milestones
-            """
-            scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=epoch_milestones, gamma=0.1)
-        else:
-            raise Exception("unknown lr scheduler")
-
-    if criterion==None:
-        # define loss function (criterion)
-        criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-
-    ########################## Get Dataset ###############
-    print("data loading")
-    if "cifar10" in args.arch:
-        args.dataset="cifar10"
-    else:
-        args.dataset="imagenet"
-    train_loader, test_loader, train_sampler = get_dataset(args)
-  
-    # training
-    _, sub_conn = app.subprocess_conns[args.gpu]
-    if sub_conn is None:
-        raise Exception("Sub_conn is None")
-    print("get sub_conn")
     try:
-        for e in range(epoch, args.epochs + 1):
-            epoch_start = time.time()
-            if args.distributed:
-                train_sampler.set_epoch(epoch)
-            print("shuffling")
-            # reset start_iteration for new epoch
-            if epoch!=e:
-                args.start_iteration = 0
-            # train for one epoch
-            last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, app, args)
+        criterion = None
+        scheduler = None
+        optimizer = None
+        epoch = 1
 
-            if last_iter != args.iteration:
+        args.gpu = local_rank
+
+        if args.distributed:
+            if args.dist_url == "env://" and args.rank == -1:
+                args.rank = int(os.environ["RANK"])
+            if args.multiprocessing_distributed:
+                # For multiprocessing distributed training, rank needs to be the
+                # global rank among all the processes
+                global_rank = app.base_rank + local_rank
+                args.rank = global_rank
+            # os.environ['NCCL_ASYNC_ERROR_HANDLING'] = 1
+            print("create cluster on {} with {}, having {} processes, current rank is {}" \
+                    .format(args.dist_backend, args.dist_url, args.world_size, global_rank))
+            dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, timeout=datetime.timedelta(seconds=180),
+                                    world_size=args.world_size, rank=global_rank)
+
+        model = build_model(args.arch, args.depth)
+
+        # if this is a paused app to resmue
+        if app.checkpoint:
+            model, optimizer, epoch, args.start_iteration, criterion = resume_train_model(model, optimizer, args, model_path=app.checkpoint_path)
+            # criterion.cuda(args.gpu)
+            print("resumes at epoch {} iter{}".format(epoch, args.start_iteration))
+
+        if args.distributed:
+            # For multiprocessing distributed, DistributedDataParallel constructor
+            # should always set the single device scope, otherwise,
+            # DistributedDataParallel will use all available devices.
+            if args.gpu is not None:
+                torch.cuda.set_device(args.gpu)
+                model.cuda(args.gpu)
+                # When using a single GPU per process and per
+                # DistributedDataParallel, we need to divide the batch size
+                # ourselves based on the total number of GPUs we have
+                args.batch_size = int(app.batch / ngpus_per_node)
+                args.workers = int(app.workers / ngpus_per_node)
+                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+                print("=> model created '{}{}' on GPU {} in DDP".format(args.arch, args.depth, args.gpu))
+            else:
+                model.cuda()
+                # DistributedDataParallel will divide and allocate batch_size to all
+                # available GPUs if device_ids are not set
+                model = torch.nn.parallel.DistributedDataParallel(model)
+                print("=> model created '{}{}' on all GPUs".format(args.arch, args.depth))
+
+
+        cudnn.benchmark = True
+
+        #warmup
+        optimizer_init_lr = args.lr
+
+        if (args.optimizer == 'sgd'):
+            optimizer = torch.optim.SGD(model.parameters(), lr=optimizer_init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        elif (args.optimizer == 'adam'):
+            optimizer = torch.optim.Adam(model.parameters(), optimizer_init_lr)
+
+        if scheduler == None:
+            #  scheduler
+            if args.lr_scheduler == 'cosine':
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=4e-08)
+            elif args.lr_scheduler == 'default':
+                # my learning rate scheduler for cifar, following https://github.com/kuangliu/pytorch-cifar
+                epoch_milestones = [60, 120]
+                """Set the learning rate of each parameter group to the initial lr decayed
+                    by gamma once the number of epoch reaches one of the milestones
+                """
+                scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=epoch_milestones, gamma=0.1)
+            else:
+                raise Exception("unknown lr scheduler")
+
+        if criterion==None:
+            # define loss function (criterion)
+            criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+
+        ########################## Get Dataset ###############
+        print("data loading")
+        if "cifar10" in args.arch:
+            args.dataset="cifar10"
+        else:
+            args.dataset="imagenet"
+        train_loader, test_loader, train_sampler = get_dataset(args)
+    
+        # training
+        _, sub_conn = app.subprocess_conns[args.gpu]
+        if sub_conn is None:
+            raise Exception("Sub_conn is None")
+        print("get sub_conn")
+        try:
+            for e in range(epoch, args.epochs + 1):
+                epoch_start = time.time()
+                if args.distributed:
+                    train_sampler.set_epoch(epoch)
+                print("shuffling")
+                # reset start_iteration for new epoch
+                if epoch!=e:
+                    args.start_iteration = 0
+                # train for one epoch
+                last_iter = train(train_loader, model, criterion, optimizer, scheduler, e, sub_conn, app, args)
+
+                if last_iter != args.iteration:
+                    epoch_end = time.time()
+                    print_app_log(app, "subprocess {} epoch_time for {} iter {}".format(args.gpu, last_iter, epoch_end - epoch_start))
+                    return
+                    
+                # adjust learning rate
+                scheduler.step()
+
                 epoch_end = time.time()
-                print_app_log(app, "subprocess {} epoch_time for {} iter {}".format(args.gpu, last_iter, epoch_end - epoch_start))
-                # while 1:
-                #     if sub_conn.poll(timeout=0.01):
-                #         message_type = sub_conn.recv()['type']
-                #         if message_type == "Exit":
-                #             print_app_log(app, "subprocess {} exit at epoch {} iter {}".format(args.gpu, e, last_iter))
-                #             return
-                return
-                
-            # adjust learning rate
-            scheduler.step()
+                print_app_log(app, "subprocess {} epoch_time {}".format(args.gpu, epoch_end - epoch_start))
+        except Exception as e:
+            print("error!\n")
+            raise Exception(e)
 
-            epoch_end = time.time()
-            print_app_log(app, "subprocess {} epoch_time {}".format(args.gpu, epoch_end - epoch_start))
+        print_app_log(app, "subprocess {} sends finish signal.".format(args.gpu))
+        sub_conn.send(conn_message("Finished"))
+    
     except Exception as e:
-        print("error!\n")
-        raise Exception(e)
-
-    print_app_log(app, "subprocess {} sends finish signal.".format(args.gpu))
-    sub_conn.send(conn_message("Finished"))
+        print("Error: main worker")
+        print(e)
+        print(traceback.format_exc())
 
 def train(train_loader, model, criterion, optimizer, scheduler, epoch ,sub_conn, app, args):
     batch_time = AverageMeter()
@@ -511,9 +509,6 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,sub_conn,
                         "iter_time": float(np.array(batch_time.tracker[-10:len(batch_time.tracker)]).mean()),
                         "dataloading_time": float(np.array(data_time.tracker[-10:len(batch_time.tracker)]).mean())}))
 
-        # if iter_inx % 30 == 0 and args.rank == 0:
-        #     save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
-
         iter_inx += 1
 
         try:
@@ -523,11 +518,19 @@ def train(train_loader, model, criterion, optimizer, scheduler, epoch ,sub_conn,
                 print_app_log(app, "subprocess {} receives a mesg {}".format(args.gpu, message))
                 if message['type'] == "Pause":
                     print("rank is {}, {}".format(args.rank, {"iter":iter_inx, "epoch": epoch}))
-                    if args.rank == 0:
-                        save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
-                    # dist.barrier() # async_op=False,
-                    sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
-                    print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
+                    sub_conn.send(conn_message("Paused_ACK", {"iter":iter_inx, "epoch": epoch}))
+
+                    message = sub_conn.recv()
+                    if message['type'] == "Save":
+                        checkpoint_path = save_train_model(epoch, iter_inx, model, optimizer, criterion, scheduler, args)
+                        sub_conn.send(conn_message("Saved", {"iter":iter_inx, "epoch":epoch, "checkpoint":checkpoint_path}))
+                        message = sub_conn.recv()
+
+                    if message['type'] == "Exit":
+                        sub_conn.send(conn_message("Paused", {"iter":iter_inx, "epoch": epoch}))
+                        print_app_log(app, "subprocess {} sends the paused signal back to app_main.".format(args.gpu))
+                    else:
+                        print("Error: recevies unknown type of message in {}".format(message))
                     break
         except Exception as e:
             print("errors!")

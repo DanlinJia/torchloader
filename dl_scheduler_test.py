@@ -41,6 +41,6 @@ ws.master.launch_listener()
 # worker.launch_listener()
 # worker.app_master = app_master
 
-
-# sb.main_fn()
-# ws.main_loop_fn()
+def run():
+    sb.main_fn()
+    ws.main_loop_fn()
