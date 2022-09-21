@@ -251,11 +251,14 @@ class app():
         self.status = 1
         self.plotted = 0
     
+    def get_workers(self):
+        return self.worker_end - self.worker_base
+
     def plot(self):
         label = None
         for i in range(self.worker_base, self.worker_end):
             # make sure only one line set label.
-            if not self.plotted:
+            if self.appid!="0" and not self.plotted:
                 label = app_info[self.appid]['model']
             ln, = self.ax.plot([self.start, self.end], [i,i], \
                             color=self.color, marker="|", \
@@ -271,13 +274,13 @@ class app():
         self.worker_base = base
         self.worker_end = end
 
-    def handel_pause(self, ts, new_workers, pre_workers):
+    def handle_pause(self, ts, new_workers, pre_workers):
         self.end = ts
         self.plot()
         self.start = ts
         self.worker_end += (new_workers - pre_workers)
 
-    def handel_finish(self, ts):
+    def handle_finish(self, ts):
         self.end = ts
         self.plot()
 
@@ -285,9 +288,9 @@ class app():
         print(vars(self))
 
 
-def update_app_plots(new_workers, pre_workers):
+def update_app_plots(new_workers, pre_workers, appid):
     for i in app_plot:
-        if app_plot[i].worker_base >= app_plot[i].worker_end:
+        if app_plot[i].worker_base >= app_plot[appid].worker_end:
             app_plot[i].worker_base += (new_workers - pre_workers)
             app_plot[i].worker_end += (new_workers - pre_workers)
 
@@ -303,16 +306,18 @@ for idx in app_workers.index:
         count += 1
     elif "arrival" in reason:
         # pdb.set_trace()
-        app_plot[appid].handel_pause(ts, new_workers, pre_workers)
-        update_app_plots(new_workers, pre_workers)
+        app_plot[appid].handle_pause(ts, new_workers, pre_workers)
+        update_app_plots(new_workers, pre_workers, appid)
     elif "finish" in reason:
         finished_app, _ = clean_split(reason, " ")
         # avoid redundant finish handling
         if app_plot[finished_app].status:
             app_plot[finished_app].status = 0
-            app_plot[finished_app].handel_finish(ts)
-        app_plot[appid].handel_pause(ts, new_workers, pre_workers)
-        update_app_plots(new_workers, pre_workers)
+            app_plot[finished_app].handle_finish(ts)
+            update_app_plots(0, app_plot[finished_app].get_workers(), finished_app)
+        update_app_plots(new_workers, pre_workers, appid)
+        app_plot[appid].handle_pause(ts, new_workers, pre_workers)
+        # pdb.set_trace()
 
 for appid in appids:
     if app_plot[appid].status:
@@ -322,7 +327,7 @@ for appid in appids:
 # all_app = app(appid = "0", ax = ax, color=colors["grey"], line_width=line_width, line_style="dashed")
 # all_app.worker_end = args.cpu
 # # all_app.end = end_time
-# all_app.plot(ax)
+# all_app.plot()
 
 # ax.set_yticks(np.arange(1, args.cpu+1))
 
