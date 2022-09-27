@@ -93,7 +93,7 @@ class application():
 
     def print_info(self):
         print("appid: {}, model: {}{}, batch: {}, workers: {}, output: {}, port: {}, cuda_device: {}, world_size: {}, node_size: {}, base_rank: {}" \
-            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, self.cuda_device, self.world_size, self.node_size, self.base_rank))
+            .format(self.appid, self.arch, self.depth, self.batch, self.workers, self.work_space, self.port, '['+ ' '.join([str(d) for d in self.cuda_device])+']', self.world_size, self.node_size, self.base_rank))
 
     def parse_args(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
