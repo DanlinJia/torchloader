@@ -141,7 +141,7 @@ class dl_tpt_pridictor():
         intact_apps = []
         apps_count_device = self.count_app_per_device(apps)
         
-        tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "workers", "device_num"])
+        tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "pre_workers", "alloc_workers", "device_num"])
         for app in apps:
             device_num = app.device_num
             cpu_tpt_per_device = self.predict_cpu_tpt(app)
@@ -151,21 +151,48 @@ class dl_tpt_pridictor():
             overload_worker_per_device = worker_per_device_int - worker_per_device_float
             tpt_df.loc[len(tpt_df), :] = [app.appid, gpu_max_tpt, \
                                             cpu_tpt_per_device, worker_per_device_float, \
-                                            overload_worker_per_device, worker_per_device_int, \
-                                            device_num]
+                                            overload_worker_per_device, worker_per_device_int+1, \
+                                            0, device_num]
+        tpt_df["global_workers"] = tpt_df["pre_workers"]*tpt_df["device_num"]
         if debug:
             print(tpt_df)
-        if (tpt_df["workers"]*tpt_df["device_num"]).sum() > self.cpu_cores:
-            tpt_df = tpt_df.sort_values(by=["over_w", "cal_w"], ascending=False)
+        if (tpt_df["global_workers"]).sum() > self.cpu_cores:
             index = 0
-            while (tpt_df["workers"]*tpt_df["device_num"]).sum() > self.cpu_cores and tpt_df["workers"].sum()!=len(tpt_df):
-                if tpt_df["workers"].iloc[index] > 1:
-                    tpt_df["workers"].iloc[index] -= 1
+            allocation_counter = {}
+            tpt_df = tpt_df.sort_values(by=["over_w", "cal_w"], ascending=False)
+            # tpt_df.alloc_workers = tpt_df.pre_workers
+            # while (tpt_df["alloc_workers"]*tpt_df["device_num"]).sum() > self.cpu_cores and tpt_df["alloc_workers"].sum()!=len(tpt_df):
+            #     if tpt_df["alloc_workers"].iloc[index] > 1:
+            #         tpt_df["alloc_workers"].iloc[index] -= 1
+            #     index = (index + 1)%len(tpt_df)
+
+            # pdb_bp()
+            while (tpt_df["alloc_workers"]*tpt_df["device_num"]).sum()  < self.cpu_cores:
+                if tpt_df["alloc_workers"].iloc[index] < tpt_df["pre_workers"].iloc[index]:
+                    tpt_df["alloc_workers"].iloc[index] += 1
+                else:
+                    allocation_counter[index] = 1
+                    if len(allocation_counter) == len(tpt_df):
+                        break
+                # if (tpt_df["alloc_workers"]*tpt_df["device_num"]).sum()  > self.cpu_cores:
+                #     tpt_df["alloc_workers"].iloc[index] -= 1
+                #     break
                 index = (index + 1)%len(tpt_df)
+        
+        else:
+            tpt_df.alloc_workers = ((tpt_df["global_workers"]/tpt_df["global_workers"].sum() * self.cpu_cores) / tpt_df["device_num"]).astype(int)
+            tpt_df = tpt_df.sort_values(by=["gpu_tpt"], ascending=False)
+            index = 0
+            while (tpt_df.alloc_workers * tpt_df.device_num).sum() < self.cpu_cores:
+                tpt_df["alloc_workers"].iloc[index] += 1
+                index = (index + 1)%len(tpt_df)
+
+
         if debug:
+            tpt_df = tpt_df.sort_values(by=["appid"])
             print(tpt_df)
         for app in apps:
-            new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "device_num"].item()
+            new_workers = tpt_df.loc[tpt_df["appid"]==app.appid, "alloc_workers"].item() * tpt_df.loc[tpt_df["appid"]==app.appid, "device_num"].item()
             if new_workers != app.workers:
                 diff_apps.append(app)
                 app.workers = new_workers
