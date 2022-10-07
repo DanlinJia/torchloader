@@ -159,7 +159,7 @@ class dl_tpt_pridictor():
         if (tpt_df["global_workers"]).sum() > self.cpu_cores:
             index = 0
             allocation_counter = {}
-            tpt_df = tpt_df.sort_values(by=["over_w", "cal_w"], ascending=False)
+            tpt_df = tpt_df.sort_values(by=["gpu_tpt"], ascending=False)
             # tpt_df.alloc_workers = tpt_df.pre_workers
             # while (tpt_df["alloc_workers"]*tpt_df["device_num"]).sum() > self.cpu_cores and tpt_df["alloc_workers"].sum()!=len(tpt_df):
             #     if tpt_df["alloc_workers"].iloc[index] > 1:
@@ -179,6 +179,11 @@ class dl_tpt_pridictor():
                 #     break
                 index = (index + 1)%len(tpt_df)
         
+            # t_df = tpt_df.sort_values(by=["gpu_tpt"], ascending=True)
+            # index = 0
+            # while (tpt_df.alloc_workers * tpt_df.device_num).sum() < self.cpu_cores:
+            #     tpt_df["alloc_workers"].iloc[index] += 1
+            #     index = (index + 1)%len(tpt_df)
         else:
             tpt_df.alloc_workers = ((tpt_df["global_workers"]/tpt_df["global_workers"].sum() * self.cpu_cores) / tpt_df["device_num"]).astype(int)
             tpt_df = tpt_df.sort_values(by=["gpu_tpt"], ascending=False)
@@ -300,6 +305,8 @@ class dl_scheduler():
         # no app should be paused at this stage, app_paused should be thread safe (TODO?)
         assert(len(self.app_paused)==0)
         apps = self.app_running + self.app_ready
+        if len(apps) == 0:
+            return [], []
         print("old_apps")
         for app in apps:
             print("app: {}, app_workers: {}".format(app.appid, app.workers))
@@ -441,6 +448,8 @@ class dl_scheduler():
         if len(self.app_ready+self.app_paused+self.app_running) == 0:
             self.app_ready.extend(apps)
             _, to_launch_apps = self.reallocate_workers()
+            for app in to_launch_apps:
+                print("{}: master: {}, worker reallocation: {}".format(datetime.datetime.now(), app.appid, [{'new_worker': app.workers, 'reason': 'arrival'}]))
             for app in self.app_ready:
                 if app in to_launch_apps:
                     self.app_ready.remove(app)
@@ -455,6 +464,8 @@ class dl_scheduler():
             try:
                 self.app_ready.extend(apps)
                 to_pause_apps, to_launch_apps = self.reallocate_workers()
+                for app in to_pause_apps:
+                    print("{}: master: {}, worker reallocation: {}".format(datetime.datetime.now(), app.appid, [{'new_worker': app.workers, 'reason': 'pause'}]))
                 self.pause_world(to_pause_apps)
                 # update ready queue
                 for app in self.app_ready:
@@ -510,8 +521,11 @@ class dl_scheduler():
             self.finished_count += 1
         self.finish_buffer = []
         self.print_queues()
+        # if self.finish_buffer == self.ap
         if self.mode == 3:
             to_pause_apps, _ = self.reallocate_workers()
+            for app in to_pause_apps:
+                print("{}: master: {}, worker reallocation: {}".format(datetime.datetime.now(), app.appid, [{'new_worker': app.workers, 'reason': 'finish'}]))
             self.pause_world(to_pause_apps)
 
     def resume_handler(self):
