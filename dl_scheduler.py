@@ -529,17 +529,17 @@ class dl_scheduler():
             self.pause_world(to_pause_apps)
 
     def resume_handler(self):
-        try:
-            while len(self.app_paused)>0:
-                app = self.app_paused.pop()
-                self.app_ready.append(app)
-            self.exec_ready_apps()
-            self.app_running.extend(self.app_ready)
-            self.app_ready = []
-            self.paused_counter=0
-            self.print_queues()
-        except Exception as e:
-            print("resume_handler", e)
+        # try:
+        while len(self.app_paused)>0:
+            app = self.app_paused.pop()
+            self.app_ready.append(app)
+        self.exec_ready_apps()
+        self.app_running.extend(self.app_ready)
+        self.app_ready = []
+        self.paused_counter=0
+        self.print_queues()
+        # except Exception as e:
+        #     print("resume_handler", e)
 
     def print_apps(self, apps):
         print([app.appid for app in apps])
