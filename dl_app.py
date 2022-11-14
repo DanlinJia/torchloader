@@ -71,6 +71,7 @@ class application():
         self.port = port
         self.arrival_time = arrival_time
         self.cuda_device = cuda_device
+        self.node_info = None
         self.device_num = world_size
         self.process = None
         self.start_iter = start_iter

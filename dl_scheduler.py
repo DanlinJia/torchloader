@@ -28,7 +28,7 @@ class submitter():
         # cumulate app submissions within buffer_size
         self.buffer_size = time_window
         self.buffer = []
-        self.submisson_num = 0
+        self.submission_num = 0
 
     def print_apps_info(self):
         for app in self.apps:
@@ -41,15 +41,17 @@ class submitter():
         # generate a set of applications by reading data from a csv file
         df = pd.read_csv(self.submit_path, header=0, skipinitialspace=True)
         df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: x.replace(" ", ",") if (type(x)==str) else x)
-        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: [list(eval(device_of_node)) for device_of_node in eval(x)])
-        df["world_size"] = df["cuda_device"].apply(lambda device_list: len([ device for device_of_node in device_list for device in device_of_node]))
+        df.loc[:, "cuda_device"] = df["cuda_device"].apply(lambda x: eval(x))
+        df["world_size"] = df["cuda_device"].apply(lambda device_dir: len( [d for node in device_dir for d in device_dir[node]]))
         if len(df)==0:
             print("Warning: No application submitted")
         for i in range(len(df)):
             app = application(i, *df.loc[i, :])
+            # save cuda_device in node_info as cuda_device will be modified
+            app.node_info = app.cuda_device
             # self.apps[app.arrival_time].append(app)
             self.apps.append(app)
-        self.submisson_num = len(self.apps)
+        self.submission_num = len(self.apps)
 
     def user_submiter_fn(self):
         def _submit():
@@ -69,7 +71,7 @@ class submitter():
                 app = self.apps.pop(0)
                 app.appid = int((app.arrival_time - cur_time)*1e9 + time.time_ns())
                 expriment_name = "app{}_{}{}_{}_{}_{}".format(
-                                app.appid, app.arch, app.depth, app.batch, app.workers, len(app.cuda_device))
+                                app.appid, app.arch, app.depth, app.batch, app.workers, app.world_size)
                 app.work_space = os.path.join("trace", app.work_space, expriment_name)
                 os.system("mkdir -p {}".format(app.work_space))
                 self.buffer.append(app)
@@ -78,7 +80,7 @@ class submitter():
             time.sleep(self.buffer_size)
             cur_time += self.buffer_size
         _submit()
-        self.conn.send(conn_message("End", {"app_num": self.submisson_num}))
+        self.conn.send(conn_message("End", {"app_num": self.submission_num}))
 
     def main_fn(self):
         submiter_j = threading.Thread(target=self.user_submiter_fn, args=(), name="user_submitter", daemon=True)
@@ -86,7 +88,7 @@ class submitter():
         # submiter_j.join()
 
 
-class dl_tpt_pridictor():
+class dl_tpt_predictor():
     def __init__(self, cpu_cores, gpu_devices, cpu_model_path='', gpu_model_path='', model_info_path=''):
         self.cpu_cores = cpu_cores
         self.gpu_devices = gpu_devices
@@ -124,28 +126,19 @@ class dl_tpt_pridictor():
         dc_flops = self.model_info[self.model_info["model"]==model_name]["DC_flops"].drop_duplicates().item()*(app.batch/device_num)
         o_flops = self.model_info[self.model_info["model"]==model_name]["O_flops"].drop_duplicates().item()*(app.batch/device_num)
         gpu_x0, gpu_x1, gpu_x2, gpu_x3 = app.batch/device_num*flops, (device_num-1)*params, params, app.batch/device_num*params
-        return (app.batch/len(app.cuda_device[0]))/self.gpu_model.predict(np.array([gpu_x1, gpu_x2, gpu_x3, c_flops,pc_flops,dc_flops,o_flops ]).reshape(1, -1))[0]
+        return (app.batch/app.device_num)/self.gpu_model.predict(np.array([gpu_x1, gpu_x2, gpu_x3, c_flops,pc_flops,dc_flops,o_flops ]).reshape(1, -1))[0]
 
-    def count_app_per_device(self, apps):
-        apps_count_device = {}
-        for app in apps:
-            for d in app.cuda_device[0]:
-                if d in apps_count_device:
-                    apps_count_device[d] += 1
-                else:
-                    apps_count_device[d] = 1
-        return apps_count_device
-
-    def worker_allocator(self, apps, debug=False):
+    def worker_allocator(self, apps, device_info=None, debug=False):
         diff_apps = []
         intact_apps = []
-        apps_count_device = self.count_app_per_device(apps)
         
         tpt_df =  pd.DataFrame(columns=["appid", "gpu_tpt", "cpu_tpt", "cal_w", "over_w", "pre_workers", "alloc_workers", "device_num"])
         for app in apps:
             device_num = app.device_num
             cpu_tpt_per_device = self.predict_cpu_tpt(app)
-            gpu_max_tpt = self.predict_gpu_tpt(app) / np.array([ apps_count_device[d] for d in app.cuda_device[0]]).max()
+            gpu_max_tpt = self.predict_gpu_tpt(app)
+            if device_info:
+                gpu_max_tpt /= np.array([ device_info[(node, device)] for node in app.cuda_device.keys() for device in app.cuda_device[node]]).max()
             worker_per_device_float = gpu_max_tpt/cpu_tpt_per_device
             worker_per_device_int = int(worker_per_device_float) + 1
             overload_worker_per_device = worker_per_device_int - worker_per_device_float
@@ -248,6 +241,8 @@ class dl_scheduler():
         # 3. reallocate workers for both arrival and finish signals
         self.mode = mode
         self.logger = logging.getLogger("dl_scheduler.log")
+        # count application number per device in a format of e.g., {('d3091', 0): 3}
+        self.device_info = {}
 
     def init_logger(self):
         self.logger.setLevel(logging.DEBUG)
@@ -310,7 +305,7 @@ class dl_scheduler():
         print("old_apps")
         for app in apps:
             print("app: {}, app_workers: {}".format(app.appid, app.workers))
-        new_apps, intact_apps = self.tp.worker_allocator(apps, debug=False)
+        new_apps, intact_apps = self.tp.worker_allocator(apps, self.device_info, debug=False)
         print("new_apps")
         for app in new_apps:
             print("app: {}, app_workers: {}".format(app.appid, app.workers))
@@ -444,6 +439,14 @@ class dl_scheduler():
             if not app.appid in self.channels:
                 parent_conn, child_conn = Pipe()
                 self.channels[app.appid] = [parent_conn, child_conn]
+        # update device information
+        for app in apps:
+            for node in app.cuda_device.keys():
+                for device in app.cuda_device[node]:
+                    if self.device_info.__contains__((node, device)):
+                        self.device_info[(node, device)] += 1
+                    else:
+                        self.device_info[(node, device)] = 1
         # if no apps submitted before, reallocate workers and run apps in app buffer
         if len(self.app_ready+self.app_paused+self.app_running) == 0:
             self.app_ready.extend(apps)
@@ -505,6 +508,14 @@ class dl_scheduler():
         #     print("pause_handler", e)
 
     def finish_handler(self):
+        # update device information
+        for app in self.finish_buffer:
+            for node in app.cuda_device.keys():
+                for device in app.cuda_device[node]:
+                    if self.device_info.__contains__((node, device)):
+                        self.device_info[(node, device)] -= 1
+                    else:
+                        raise Exception("No {} exsitent!".format((node,device)))
         for app in self.finish_buffer:
             # join app process once it reaches to the end
             # app.process.join()

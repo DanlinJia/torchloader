@@ -92,7 +92,10 @@ class dl_master():
             self.listener.send_json(conn_message('Registered', {'worker_id': worker_id}))
             self.create_worker_messager(worker_info)
             # self.create_rpc_client(worker_info)
-        
+    
+    def worker_id2ip(self, worker_id):
+        return self.workers[worker_id]["worker_ip"]
+
     def create_worker_messager(self, worker_info):
         context = zmq.Context()
         #  Socket to talk to server
@@ -118,7 +121,8 @@ class dl_master():
         determine app's arguments for worker_id
         """
         app.attach_node(worker_id)
-        app.cuda_device = app.cuda_device[worker_id]
+        node_name = self.worker_id2ip(worker_id)
+        app.cuda_device = app.node_info[node_name]
         app.base_rank = base_rank
         base_rank += len(app.cuda_device)
         app.batch = int(app.batch * (len(app.cuda_device)/app.world_size))
@@ -129,6 +133,8 @@ class dl_master():
         # worker_id represents the index of node in the cluster
         base_rank = 0
         for worker_id, messager in enumerate(self.worker_messager.values()):
+            if self.worker_id2ip(worker_id) not in app.node_info:
+                continue
             # save app infomation
             self.app_event_count[app.appid] = 0
             # an app will be coming
@@ -148,7 +154,9 @@ class dl_master():
                 raise Exception("app header transfer failed!")
 
     def launch_app(self, app):
-        for messager in self.worker_messager.values():
+        for worker_id, messager in enumerate(self.worker_messager.values()):
+            if self.worker_id2ip(worker_id) not in app.node_info:
+                continue
             # I need to launch an app
             messager.send_json(conn_message("Launch"))
             # you know the app will be coming
@@ -161,6 +169,8 @@ class dl_master():
     def pause_app(self, app):
         app_id = app.appid
         for messager in self.worker_messager.values():
+            if self.worker_id2ip(worker_id) not in app.node_info:
+                continue
             # pause app with app_id
             messager.send_json(conn_message("Pause", {"app_id":app_id}))
             # receive pause ack
