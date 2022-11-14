@@ -1,5 +1,5 @@
 arch,depth,batch,workers,output_folder,master,port,arrival_time,cuda_device,start_iter,start_epoch,end_iter,end_epoch,node_size
-resnet, 10, 512, 16, "test-48worker-2node-mod3",d3093, 12448, 1, ["0 1" "0 1"], 0, 1, 500, 1, 2
-vgg, 11, 512, 16, "test-48worker-2node-mod3",d3093, 23448, 1, ["1 2" "1 2"], 0, 1, 500, 1, 2
-googlenet, 1, 512, 16, "test-48worker-2node-mod3",d3093, 58448,  1, ["0 2" "0 2"], 0, 1, 500, 1, 2
+vgg, 13, 256, 12, "test-18worker-1node-mod3",d3091, 12448, 0, {'d3091':[0 1]}, 0, 1, 1000, 1, 1
+resnet, 26, 256, 8, "test-18worker-1node-mod3",d3091, 23448, 0, {'d3091':[0 1]}, 0, 1, 1000, 1, 1
+vgg, 61, 256, 10, "test-18worker-1node-mod3",d3091, 58448,  0, {'d3091':[0 1]}, 0, 1, 1000, 1, 1
 
