@@ -89,9 +89,9 @@ class submitter():
 
 
 class dl_tpt_predictor():
-    def __init__(self, cpu_cores, gpu_devices, cpu_model_path='', gpu_model_path='', model_info_path=''):
+    def __init__(self, cpu_cores, node_size, cpu_model_path='', gpu_model_path='', model_info_path=''):
         self.cpu_cores = cpu_cores
-        self.gpu_devices = gpu_devices
+        self.node_size = node_size
         self.cpu_model = None
         self.gpu_model = None
         self.model_info = None
@@ -179,11 +179,14 @@ class dl_tpt_predictor():
             #     index = (index + 1)%len(tpt_df)
         else:
             tpt_df.alloc_workers = ((tpt_df["global_workers"]/tpt_df["global_workers"].sum() * self.cpu_cores) / tpt_df["device_num"]).astype(int)
+            # cpu_per_node_max = int(self.cpu_cores/self.node_size)
+            # tpt_df["alloc_workers"] = tpt_df["alloc_workers"].apply(lambda x: x if x < cpu_per_node_max else cpu_per_node_max )
             tpt_df = tpt_df.sort_values(by=["gpu_tpt"], ascending=False)
             index = 0
             while (tpt_df.alloc_workers * tpt_df.device_num).sum() < self.cpu_cores:
                 tpt_df["alloc_workers"].iloc[index] += 1
                 index = (index + 1)%len(tpt_df)
+
 
 
         if debug:

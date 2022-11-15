@@ -20,6 +20,7 @@ class dl_master():
         self.rpc_clients = {}
         self.worker_messager = {}
         self.app_event_count = {}
+        self.app_info = {}
         self._init_master()
 
     def _init_master(self):
@@ -54,7 +55,7 @@ class dl_master():
                     self.listener.send_json(conn_message("Paused_ack"))
                     app_id = msg['msg']['app_id']
                     worker_id = msg['msg']['worker_id']
-                    if self.app_event_count[app_id] + 1 == len(self.workers):
+                    if self.app_event_count[app_id] + 1 == self.app_info[app_id].node_size:
                         self.app_event_count[app_id] = 0
                         if self.ms_conn:
                             self.ms_conn.send(msg)
@@ -65,7 +66,7 @@ class dl_master():
                     self.listener.send_json(conn_message("Finished_ack"))
                     app_id = msg['msg']['app_id']
                     worker_id = msg['msg']['worker_id']
-                    if self.app_event_count[app_id] + 1 == len(self.workers):
+                    if self.app_event_count[app_id] + 1 == self.app_info[app_id].node_size:
                         self.app_event_count[app_id] = 0
                         if self.ms_conn:
                             self.ms_conn.send(msg)
@@ -163,6 +164,7 @@ class dl_master():
             msg = messager.recv_json()
             if msg['type']!='Launch_ack':
                 raise Exception("Launch app failed!")
+        self.app_info[app.appid] = app
         # send app to master
         self.send_app(app)
     

@@ -158,6 +158,7 @@ class dl_worker():
     
     def send_finished_signal(self, app_id):
         self.messager.send_json(conn_message("Finished", {'app_id': app_id, 'worker_id': self.worker_id}))
+        print("app {} sends finishsed signal to master".format(app_id))
         msg = self.messager.recv_json()
         if msg['type']!='Finished_ack':
                 raise Exception("Sending finished signal failed!") 
